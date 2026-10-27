@@ -131,6 +131,7 @@ The first data model should support:
 - Display name.
 - Optional birthday.
 - Optional timezone or date-handling metadata where appropriate.
+- Optional interests and preferences, each a list of short, user-entered text entries. Count and length limits are defined in the API schema. These are user-provided information; AI-suggested or discovered candidates are stored separately as unconfirmed until the user accepts them (ADR-003).
 - Created and updated timestamps.
 
 ### Note
