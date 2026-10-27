@@ -1,0 +1,57 @@
+
+name: Bug report
+description: Report unexpected application behavior
+title: "[BUG] "
+labels: ["type: bug", "status: triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What went wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Impact
+      options:
+        - P0 - Critical
+        - P1 - High
+        - P2 - Normal
+        - P3 - Low
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and safe reproduction details
+      description: Include browser, OS, logs, and test data. Never include real people's private information or credentials.
+    validations:
+      required: true

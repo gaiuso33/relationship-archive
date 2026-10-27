@@ -1,0 +1,54 @@
+
+name: Feature request
+description: Propose a product feature or improvement
+title: "[FEATURE] "
+labels: ["type: feature", "status: ready"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What user need are we addressing?
+      placeholder: As a user, I want...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List testable conditions for completion.
+      placeholder: |
+        - [ ] Expected behavior works
+        - [ ] Invalid input is handled
+        - [ ] Tests cover the behavior
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0 - Critical
+        - P1 - High
+        - P2 - Normal
+        - P3 - Low
+    validations:
+      required: true
+
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy and security considerations
+      description: What personal data, permissions, or risks are involved?
+    validations:
+      required: true
