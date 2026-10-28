@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relationship-archive-backend"
+version = "0.1.0"
+description = "API for Relationship Archive, a private relationship memory application."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.162,<1",
+    "pydantic-settings>=2.16,<3",
+    "uvicorn>=0.54,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx2>=2.16,<3",
+    "pytest>=9.2,<10",
+    "ruff>=0.17,<0.18",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
