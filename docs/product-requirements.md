@@ -61,7 +61,7 @@ Initially, an individual user managing their own relationship archive. The archi
 The first usable release should include:
 1. Secure authentication.
 2. Create, view, edit, and delete people profiles.
-3. Store personal notes and birthdays.
+3. Store interests, preferences, personal notes, and birthdays.
 4. Display upcoming birthdays.
 5. Configure basic reminders.
 6. Run automated tests in CI.
