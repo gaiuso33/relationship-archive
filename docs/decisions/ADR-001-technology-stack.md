@@ -1,7 +1,8 @@
 # ADR-001: Initial Technology Stack
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-27
+- **Accepted:** 2026-10-28, on the project maintainer's instruction
 - **Decision owners:** Project maintainer
 
 ## Context
@@ -59,3 +60,9 @@ Hosting and deployment providers will be selected separately.
 ## Review conditions
 
 Reconsider this decision if the stack materially slows development, creates operational costs that the project cannot sustain, or fails to meet privacy and reliability requirements.
+
+## Acceptance review
+
+Accepted on 2026-10-28 on the project maintainer's instruction, after the contents were compared with the agreed stack in the project instructions and `docs/architecture.md`. The frontend, backend, database, ORM, migration, authentication, testing and CI choices match.
+
+Not decided here: hosting and deployment providers, which remain open and are decided separately in #33.

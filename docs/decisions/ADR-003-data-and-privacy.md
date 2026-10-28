@@ -1,7 +1,8 @@
 # ADR-003: Personal Data Handling and Privacy Boundaries
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-27
+- **Accepted:** 2026-10-28, on the project maintainer's instruction
 - **Decision owners:** Project maintainer
 
 ## Context
@@ -58,3 +59,9 @@ They also create a foundation for evaluating future AI providers and public data
 ## Review conditions
 
 Review this decision before enabling AI processing, public profile discovery, data sharing, background refreshes, or any feature that sends personal information to an external service.
+
+## Acceptance review
+
+Accepted on 2026-10-28 on the project maintainer's instruction, after the contents were compared with the privacy and security principles in the project instructions and `docs/architecture.md` section 9. Private-by-default storage, provenance, AI boundaries, public-profile discovery limits, user control and synthetic test data match.
+
+Not decided here: the AI provider and its permitted data boundaries (#23) and the approved discovery sources (#29). The review conditions above still apply before either is enabled.
