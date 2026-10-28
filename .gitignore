@@ -227,3 +227,22 @@ npm-debug.log*
 # Local environment files (the committed .env.example is kept)
 .env.*
 !.env.example
+
+# Credentials, keys and local data. This application handles personal data,
+# so keep keys, local databases and database dumps out of the repository.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+secrets.json
+credentials.json
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+
+# OS and tooling files
+.DS_Store
+coverage/
