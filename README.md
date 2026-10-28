@@ -2,7 +2,7 @@
 
 A private-by-default, AI-assisted relationship memory application. It helps you remember meaningful details about the people in your life, keep notes, and remember birthdays, while keeping you in control of your information.
 
-The project is at the engineering foundation stage (milestone v0.1.0). The application currently consists of a minimal scaffold: a React frontend and a FastAPI backend with a health endpoint. See `docs/product-requirements.md` for the product scope and `docs/architecture.md` and `docs/decisions/` for the design.
+The project is at the engineering foundation stage (milestone v0.1.0). The application currently consists of a minimal scaffold: a React frontend and a FastAPI backend with a health endpoint.
 
 ## Stack
 
@@ -10,43 +10,16 @@ The project is at the engineering foundation stage (milestone v0.1.0). The appli
 - Backend: Python, FastAPI (`backend/`)
 - Planned: PostgreSQL, SQLAlchemy, Alembic and Supabase Auth, introduced by later issues
 
-## Running the checks
+## Getting started
 
-These are the same commands CI runs. Full setup, environment and troubleshooting instructions are tracked in issue #6.
+The [development guide](docs/development.md) covers prerequisites, environment configuration, running the frontend and backend, running the tests, building, and troubleshooting.
 
-Prerequisites: Node.js 22.12 or later and Python 3.12.
+## Contributing
 
-Backend:
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow: issues, branch names, pull requests, testing and review.
 
-```sh
-cd backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-ruff check .
-pytest -q
-```
+## Documentation
 
-Frontend:
-
-```sh
-cd frontend
-npm ci
-npm run lint
-npm run test -- --run
-npm run build
-```
-
-## Running locally
-
-```sh
-# Backend: http://localhost:8000/api/v1/health
-cd backend && uvicorn app.main:app --reload
-
-# Frontend: the URL is printed by Vite
-cd frontend && npm run dev
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` for local settings. `.env` is ignored by git. Never commit credentials, tokens or real personal data; tests and demos use synthetic data only.
+- [Product requirements](docs/product-requirements.md)
+- [Architecture](docs/architecture.md) and [decision records](docs/decisions/)
+- [Development guide](docs/development.md)
