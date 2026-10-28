@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node / frontend
+node_modules/
+*.tsbuildinfo
+npm-debug.log*
+
+# Local environment files (the committed .env.example is kept)
+.env.*
+!.env.example
