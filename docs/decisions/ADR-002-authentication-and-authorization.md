@@ -1,7 +1,8 @@
 # ADR-002: Managed Authentication and Server-Side Authorization
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-27
+- **Accepted:** 2026-10-28, on the project maintainer's instruction
 - **Decision owners:** Project maintainer
 
 ## Context
@@ -58,3 +59,9 @@ Managed authentication reduces identity-management overhead, but the project rem
 ## Review conditions
 
 Review this decision before adding multi-user sharing, delegated access, administrative access to personal records, or any new authentication provider.
+
+## Acceptance review
+
+Accepted on 2026-10-28 on the project maintainer's instruction, after the contents were compared with the authentication and authorization decisions in the project instructions and `docs/architecture.md` section 7. The managed-identity choice, server-side token verification, owner-scoped access and testing requirements match.
+
+Not decided here: the exact token verification implementation. This ADR requires a supported, maintained approach but does not choose one; the choice is made and approved in #10.
