@@ -98,6 +98,21 @@ jobs:
           # Pushes to main, the weekly schedule and manual runs scan the whole history.
           "${RUNNER_TEMP}/gitleaks" "${args[@]}" .
 
+      # DEMO ONLY (throwaway branch): surface the redacted scanner output as an annotation,
+      # because workflow logs cannot be read from the review environment.
+      - name: Demo evidence
+        if: always()
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          out="$("${RUNNER_TEMP}/gitleaks" git --config .gitleaks.toml --redact --no-banner --verbose --log-opts "${BASE_SHA}..${HEAD_SHA}" . 2>&1)"
+          echo "::notice title=demo-exit::status=$?"
+          echo "::notice title=demo-output::$(echo "$out" | grep -E "RuleID|File|Line|Secret|Finding|leaks found|commits scanned" | tr '\n' '|' | cut -c1-1200)"
+          if echo "$out" | grep -q "DEMO0123456789ABCDEF"; then echo "::notice title=demo-redaction::CANARY VALUE VISIBLE"; else echo "::notice title=demo-redaction::canary value not present in output"; fi
+          if echo "$out" | grep -q "q8Zr3KfV7mWx2LpT9yNc5HbJ4sDg6AeU"; then echo "::notice title=demo-redaction2::GENERIC VALUE VISIBLE"; else echo "::notice title=demo-redaction2::generic value not present in output"; fi
+
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-24.04
