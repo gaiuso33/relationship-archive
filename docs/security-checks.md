@@ -8,7 +8,7 @@ For the workflow around them, see [CONTRIBUTING.md](../CONTRIBUTING.md). For the
 
 | Check (job name) | Tool | Looks for | When |
 |---|---|---|---|
-| **Secret scan** | [Gitleaks](https://github.com/gitleaks/gitleaks) | Committed credentials, tokens and keys | Pull requests (the commits the PR adds), pushes to `main` and a weekly schedule (whole history), manual runs |
+| **Secret scan** | [Gitleaks](https://github.com/gitleaks/gitleaks) | Committed credentials, tokens and keys | Pull requests (the commits the PR adds), pushes to `main`, a weekly schedule and manual runs (the history the checkout fetches: see [exact scope](#exact-scope-of-the-scan)) |
 | **Dependency audit** | `npm audit`, [pip-audit](https://github.com/pypa/pip-audit) | Known vulnerabilities in the frontend and backend dependencies | Pull requests, pushes to `main`, a weekly schedule, manual runs |
 
 These checks complement, and do not replace, GitHub's own secret scanning and push protection, which are repository settings. CodeQL code scanning is not part of this work.
@@ -23,17 +23,27 @@ Both jobs run with `permissions: contents: read`, use no repository secrets, and
 | npm advisory of high or critical severity | **Fails** "Dependency audit" |
 | npm advisory of low or moderate severity | **Warning** annotation: the job stays green, the full report is in the log |
 | Any pip-audit finding (pip-audit has no severity filter) | **Fails** "Dependency audit", unless an unexpired [exception](#python-vulnerability-exceptions) covers it |
-| Scanner or advisory service unavailable | **Fails**, so a pass always means a real scan ran. Re-run the job |
+| Gitleaks download fails or its checksum does not match | **Fails** before anything is extracted or run (checked locally; see [verification status](#verification-status)) |
+| `npm audit` or pip-audit cannot reach its advisory service | **Intended to fail**, so a pass always means a real scan ran. **Not tested**: re-run the job, and tell the maintainer if it passes without having audited anything |
 | Malformed or expired pip-audit exception | **Fails** |
 
-"Secret scan" is intended to become a required check after it has been validated on `main` (a repository ruleset change made by the owner). "Dependency audit" is not required, so a newly published advisory cannot block an unrelated pull request. It still shows red on the pull request and on the weekly run, and a failing weekly run is reported by GitHub's usual workflow failure notification. Do not ignore a red "Dependency audit".
+"Secret scan" is intended to become a required check after it has been validated on `main` (a repository ruleset change made by the owner). "Dependency audit" is not required, so a newly published advisory cannot block an unrelated pull request. It still shows red on the pull request and on the weekly run. Whether and to whom GitHub sends a notification when a scheduled run fails depends on GitHub's notification settings and has **not been verified** here, so check the Actions tab after the first scheduled run instead of relying on a notification. Do not ignore a red "Dependency audit".
 
 ## How the secret scan works
 
 - Gitleaks is pinned by version and by the SHA-256 of the release archive, and the job refuses to run if the checksum does not match.
 - Before scanning, the job writes a fresh synthetic canary (`RA_CANARY_` followed by 20 characters) into a temporary directory and requires Gitleaks to detect it, exit with status 1 and redact it. This proves the scanner, its configuration and its redaction work on every run. The canary exists only on the runner and is never committed.
 - Findings are redacted (`--redact`): the log shows the file, line, rule and commit, never the secret. No report file is written.
-- Configuration: [`.gitleaks.toml`](../.gitleaks.toml). It keeps every default rule and adds the canary rule and a short allowlist for the documented placeholder passwords (local development database, CI service container, test fixtures).
+- Configuration: [`.gitleaks.toml`](../.gitleaks.toml). It keeps every default rule and adds the canary rule and a short allowlist for the documented placeholder passwords (local development database, CI service container, test fixtures). On the history checked so far, the default rules do not flag those placeholders, so the allowlist currently suppresses nothing (see [verification status](#verification-status)).
+
+### Exact scope of the scan
+
+| Trigger | What Gitleaks scans | Status |
+|---|---|---|
+| Pull request | Only the commits the PR adds: `git log <base sha>..<head sha>`, from the event payload | **Confirmed** in draft PR #48: 3 commits scanned (this branch's commit plus 2 demo commits) |
+| Push to `main`, weekly schedule, manual run | Gitleaks's default history walk over the clone made by `actions/checkout` with `fetch-depth: 0`, which fetches all branches and tags | **Partly confirmed.** The clone holds the current branch, every remote-tracking branch and the tags, and no `refs/pull/*` refs. On a stand-in history Gitleaks reported "14 commits scanned" while `git rev-list --all` listed 20, and I did not confirm why (merge commits are the likely reason). Both `--all` and `HEAD` listed the same 20 commits there, so that run cannot show whether Gitleaks follows every branch or only the checked-out one |
+
+The scan covers committed history only. It does not read anything outside the repository, and a secret that was only ever in a closed pull request's refs is not covered.
 
 Run it locally if you have Gitleaks installed (`gitleaks git --config .gitleaks.toml --redact --no-banner --verbose .`). CI is the reference.
 
@@ -82,7 +92,7 @@ pip-audit fails on any known vulnerability. If a finding cannot be fixed immedia
 }
 ```
 
-All four fields are required. `expires` must be in the future and no more than 180 days away. An expired entry fails the job, so an exception cannot quietly become permanent. Renewing one needs a new pull request with a fresh rationale. The checker is [`run_pip_audit.py`](../.github/security/run_pip_audit.py), with unit tests that run in the job.
+All four fields are required. `expires` must be **strictly after today** (tomorrow at the earliest: an entry whose date is today already fails) and no more than 180 days away. A failing entry fails the job, so an exception cannot quietly become permanent. Renewing one needs a new pull request with a fresh rationale. The checker is [`run_pip_audit.py`](../.github/security/run_pip_audit.py), with unit tests that run in the job.
 
 ## Triage
 
@@ -116,3 +126,32 @@ These are changed by the repository owner in GitHub, not by code in this reposit
 | Dependabot alerts and security updates enabled | the same command (`dependabot_security_updates`), and `gh api repos/gaiuso33/relationship-archive/dependabot/alerts` must not answer "disabled" |
 | Default workflow permissions are read-only, and Actions cannot approve pull requests | `gh api repos/gaiuso33/relationship-archive/actions/permissions/workflow` |
 | "Secret scan" is a required check on `main` | the `branch protection` ruleset, Require status checks |
+
+## Verification status
+
+What has actually been checked, so that nothing here is read as more certain than it is. "CI" means a GitHub Actions run; "locally" means a scratch environment, with nothing committed.
+
+**Confirmed**
+
+| Behaviour | How it was checked |
+|---|---|
+| The canary self-test passes (detected, exit status 1, redacted) | CI: Security run 40869554974 on pull request #47 |
+| A committed fake secret fails "Secret scan" with exit status 1, in a pull request | CI: draft PR #48, closed unmerged. Two findings (the canary rule and the default `generic-api-key` rule), both shown as `REDACTED`; neither fake value appeared in the output |
+| Pull requests scan only the commits they add | CI: draft PR #48, 3 commits scanned |
+| A full-history scan of the repository history so far finds nothing | CI, throwaway branch holding the history of `main` plus the commits of pull request #47: 14 commits scanned, no leaks, with and without the allowlist. This is a stand-in for `main`, not `main` itself |
+| A wrong, malformed or missing checksum stops the Gitleaks install before extraction | Locally: the exact `set -euo pipefail` plus `sha256sum --check --strict` pattern exits 1 on a mismatch and on a malformed line. The matching-checksum path also ran in CI |
+| `npm audit` reports 0 vulnerabilities on the current lockfile, and `--audit-level=high` exits 1 when a high-severity advisory exists | Locally, on a clean copy of `frontend/` without `node_modules`, and on a scratch package pinned to an old `lodash`. In CI only the 0-vulnerability path has run |
+| pip-audit exits 1 on a vulnerable package, exits 0 when every finding has a valid exception, and the wrapper refuses expired or malformed exceptions | Locally (an old `urllib3` pin in a scratch environment) plus 17 unit tests, which also run in CI. Mutation checks confirmed that the tests fail if either expiry boundary changes |
+
+**Not yet verified**
+
+| Behaviour | Why it matters |
+|---|---|
+| The first push-to-`main` run of "Secret scan" (the real full-history run) | Only the stand-in above has been scanned. Do not make "Secret scan" a required check until this run is green |
+| The weekly scheduled run of either job | A schedule only starts from the default branch, so it cannot run before this workflow is merged |
+| `npm audit` and pip-audit when their advisory service is unreachable | Both are expected to exit non-zero, which fails the job. This was not tested |
+| GitHub's notification when a scheduled workflow fails | Depends on GitHub's settings. Not verified |
+| Which refs Gitleaks walks on a push (see the scope table) | The stand-in could not distinguish `--all` from `HEAD` |
+| `dependabot.yml` being accepted by GitHub, and the `docker-compose` ecosystem finding `compose.yaml` | GitHub validates the file only on the default branch. After merging, open Insights, Dependency graph, Dependabot |
+| The repository settings that support these checks (Actions default permissions, fork pull request approval, Dependabot alerts) | Some endpoints are blocked in the review environment. The settings table above lists how the owner can check them |
+
