@@ -1,0 +1,3 @@
+Synthetic fixture for the issue #8 scanner demonstration. Not real credentials.
+canary = RA_CANARY_DEMO0123456789ABCDEF
+internal_service_api_key = "q8Zr3KfV7mWx2LpT9yNc5HbJ4sDg6AeU"
