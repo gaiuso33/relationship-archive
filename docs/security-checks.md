@@ -139,6 +139,7 @@ What has actually been checked, so that nothing here is read as more certain tha
 | A committed fake secret fails "Secret scan" with exit status 1, in a pull request | CI: draft PR #48, closed unmerged. Two findings (the canary rule and the default `generic-api-key` rule), both shown as `REDACTED`; neither fake value appeared in the output |
 | Pull requests scan only the commits they add | CI: draft PR #48, 3 commits scanned |
 | A full-history scan of the repository history so far finds nothing | CI, throwaway branch holding the history of `main` plus the commits of pull request #47: 14 commits scanned, no leaks, with and without the allowlist. This is a stand-in for `main`, not `main` itself |
+| `.github/dependabot.yml` is syntactically valid for GitHub | CI: Dependabot's own check "Dependabot config file validation" reported "All changes look good" on a throwaway pull request carrying this file. (It did not appear on the check list of pull request #47's head commit; the reason is unknown) |
 | A wrong, malformed or missing checksum stops the Gitleaks install before extraction | Locally: the exact `set -euo pipefail` plus `sha256sum --check --strict` pattern exits 1 on a mismatch and on a malformed line. The matching-checksum path also ran in CI |
 | `npm audit` reports 0 vulnerabilities on the current lockfile, and `--audit-level=high` exits 1 when a high-severity advisory exists | Locally, on a clean copy of `frontend/` without `node_modules`, and on a scratch package pinned to an old `lodash`. In CI only the 0-vulnerability path has run |
 | pip-audit exits 1 on a vulnerable package, exits 0 when every finding has a valid exception, and the wrapper refuses expired or malformed exceptions | Locally (an old `urllib3` pin in a scratch environment) plus 17 unit tests, which also run in CI. Mutation checks confirmed that the tests fail if either expiry boundary changes |
@@ -152,6 +153,6 @@ What has actually been checked, so that nothing here is read as more certain tha
 | `npm audit` and pip-audit when their advisory service is unreachable | Both are expected to exit non-zero, which fails the job. This was not tested |
 | GitHub's notification when a scheduled workflow fails | Depends on GitHub's settings. Not verified |
 | Which refs Gitleaks walks on a push (see the scope table) | The stand-in could not distinguish `--all` from `HEAD` |
-| `dependabot.yml` being accepted by GitHub, and the `docker-compose` ecosystem finding `compose.yaml` | GitHub validates the file only on the default branch. After merging, open Insights, Dependency graph, Dependabot |
+| Dependabot actually opening update pull requests, and the `docker-compose` ecosystem finding `compose.yaml` | Only visible after the file is on the default branch. After merging, open Insights, Dependency graph, Dependabot |
 | The repository settings that support these checks (Actions default permissions, fork pull request approval, Dependabot alerts) | Some endpoints are blocked in the review environment. The settings table above lists how the owner can check them |
 
