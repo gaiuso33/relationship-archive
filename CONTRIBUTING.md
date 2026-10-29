@@ -54,7 +54,7 @@ A reviewer checks that:
 - the security and privacy checklist holds, for example access checks on private data and no personal data in logs;
 - documentation is updated and the diff contains nothing unrelated.
 
-Merging requires passing CI. The two CI jobs are **Frontend checks** and **Backend checks**, and `main` requires both to pass before a pull request can be merged.
+Merging requires passing CI. A separate Security workflow adds the "Secret scan" and "Dependency audit" jobs (see [docs/security-checks.md](docs/security-checks.md)); a failing "Dependency audit" is not required to merge but must not be ignored. The two main CI jobs are **Frontend checks** and **Backend checks**, and `main` requires both to pass before a pull request can be merged.
 
 `main` is protected by a repository ruleset: changes must arrive through a pull request, both checks above are required, force pushes and deletion are blocked, and there are no bypass actors. A pull request does not have to be up to date with `main` to merge. The ruleset does not currently require an approving review, because the maintainer is the only reviewer and GitHub does not allow approving your own pull request. A review is still expected.
 
@@ -103,7 +103,7 @@ Issues list their dependencies. Do not start an issue whose dependencies are unf
 
 Treat every relationship record as private personal data.
 
-- Never commit credentials, tokens, `.env` files or real personal data, and never paste them into issues, pull requests, logs or screenshots.
+- Never commit credentials, tokens, `.env` files or real personal data, and never paste them into issues, pull requests, logs or screenshots. The "Secret scan" job checks every pull request; how findings are triaged is in [docs/security-checks.md](docs/security-checks.md).
 - Do not log access tokens or the contents of notes.
 - If you commit a secret, revoke or rotate it immediately. Deleting it in a later commit is not enough, because it stays in the history. Tell the maintainer.
 - Do not report vulnerabilities in public issues or pull requests. Report them privately with [GitHub private vulnerability reporting](https://github.com/gaiuso33/relationship-archive/security/advisories/new).

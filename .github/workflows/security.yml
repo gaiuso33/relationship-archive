@@ -1,0 +1,155 @@
+name: Security
+
+# Security checks that run beside the main CI workflow (ci.yml). They are separate jobs so
+# the required checks "Frontend checks" and "Backend checks" are unaffected.
+# Policy, triage and exceptions: docs/security-checks.md
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, so newly published advisories surface without a pull request.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+# Least privilege: nothing here needs to write to the repository, and no job uses secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      # Gitleaks release pinned by version and SHA-256. To upgrade, see docs/security-checks.md.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Gitleaks (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" version
+
+      - name: Prove the scanner detects and redacts a synthetic canary
+        run: |
+          set -euo pipefail
+          # The canary is generated here, at run time, in a temporary directory. It is never
+          # committed and is not a real credential.
+          canary_dir="${RUNNER_TEMP}/canary"
+          mkdir -p "${canary_dir}"
+          suffix="$(openssl rand -hex 10 | tr 'a-f' 'A-F')"
+          printf 'RA_CANARY_%s\n' "${suffix}" > "${canary_dir}/fixture.txt"
+
+          set +e
+          output="$("${RUNNER_TEMP}/gitleaks" dir "${canary_dir}" \
+            --config .gitleaks.toml --redact --no-banner --verbose 2>&1)"
+          status=$?
+          set -e
+          rm -rf "${canary_dir}"
+
+          if [ "${status}" -ne 1 ]; then
+            echo "::error title=Scanner self-test::expected exit status 1 for the canary, got ${status}"
+            exit 1
+          fi
+          if ! grep -q "ra-synthetic-canary" <<<"${output}"; then
+            echo "::error title=Scanner self-test::the canary was not reported by rule ra-synthetic-canary"
+            exit 1
+          fi
+          if grep -q "${suffix}" <<<"${output}"; then
+            echo "::error title=Scanner self-test::the canary value appeared in the output (redaction failed)"
+            exit 1
+          fi
+          echo "Canary detected, exit status 1, value redacted."
+
+      - name: Scan for secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # --redact: a finding never prints the secret itself. No report file is written and
+          # nothing is uploaded, so findings are not copied anywhere else.
+          args=(git --config .gitleaks.toml --redact --no-banner --verbose)
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # Only the commits this pull request adds.
+            args+=(--log-opts "${BASE_SHA}..${HEAD_SHA}")
+          fi
+          # Pushes to main, the weekly schedule and manual runs scan the whole history.
+          "${RUNNER_TEMP}/gitleaks" "${args[@]}" .
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: frontend/.nvmrc
+
+      # `npm audit` reads package-lock.json only, so dependencies are not installed and no
+      # install scripts run in this job.
+      - name: npm audit, report all severities (warning only)
+        working-directory: frontend
+        run: |
+          if ! npm audit; then
+            echo "::warning title=npm audit::Advisories were found. Only high or critical severity fails the job."
+          fi
+
+      - name: npm audit, fail on high or critical
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            .github/security/requirements-audit.txt
+
+      - name: Install backend dependencies and pip-audit (separate environments)
+        run: |
+          set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/project-venv"
+          "${RUNNER_TEMP}/project-venv/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/project-venv/bin/python" -m pip install -e "./backend[dev]"
+          python -m venv "${RUNNER_TEMP}/audit-venv"
+          "${RUNNER_TEMP}/audit-venv/bin/python" -m pip install -r .github/security/requirements-audit.txt
+
+      - name: Unit-test the exceptions checker
+        run: python -m unittest discover -s .github/security -p "test_*.py" -v
+
+      - name: pip-audit (any finding fails, unless an unexpired exception exists)
+        run: |
+          set -euo pipefail
+          site_packages="$("${RUNNER_TEMP}/project-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          "${RUNNER_TEMP}/audit-venv/bin/python" .github/security/run_pip_audit.py --path "${site_packages}"
