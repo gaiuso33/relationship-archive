@@ -67,12 +67,15 @@ Merging requires passing CI. The two CI jobs are **Frontend checks** and **Backe
 | Unit and component tests | `frontend/` | `npm run test -- --run` |
 | Production build | `frontend/` | `npm run build` |
 | Lint | `backend/` | `ruff check .` |
-| Tests | `backend/` | `pytest -q` |
+| Apply migrations | `backend/` | `alembic upgrade head` |
+| Models and migrations agree | `backend/` | `alembic check` |
+| Tests (need PostgreSQL) | `backend/` | `pytest -q` |
 
 - Add or update tests for every behavior change, and add a regression test for every bug fix.
 - Never delete, skip or weaken a test just to make CI pass.
 - Features that touch private data need authorization tests, including that one user cannot read, change or delete another user's records ([ADR-002](docs/decisions/ADR-002-authentication-and-authorization.md)).
 - Use synthetic data only.
+- Database tests run against a real PostgreSQL and fail rather than skip when it is missing. Schema changes need an Alembic migration.
 
 ## Labels and priority
 

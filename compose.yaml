@@ -1,0 +1,29 @@
+# Local PostgreSQL for development and tests. DEVELOPMENT ONLY.
+#
+# The password below is a fixed placeholder for your own machine. The port is bound to
+# 127.0.0.1 so nothing else on the network can reach it. Never reuse this password, or
+# this file, for production or any shared environment.
+#
+# Usage and commands: docs/development.md ("Database").
+services:
+  postgres:
+    image: postgres:17
+    container_name: relationship-archive-postgres
+    environment:
+      POSTGRES_USER: ra_dev
+      POSTGRES_PASSWORD: development-only-password
+      POSTGRES_DB: relationship_archive
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs once, when the data volume is first created: adds the dedicated test database.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ra_dev -d relationship_archive"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

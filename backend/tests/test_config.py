@@ -30,3 +30,54 @@ def test_rejects_unknown_environment_name(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(ValidationError):
         make_settings()
+
+
+PASSWORD = "synthetic-password-for-tests"
+
+
+def test_database_urls_default_to_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+
+    settings = make_settings()
+
+    assert settings.database_url is None
+    assert settings.test_database_url is None
+
+
+def test_reads_database_url_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = f"postgresql+psycopg://user:{PASSWORD}@127.0.0.1:5432/example"
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    settings = make_settings()
+
+    assert settings.database_url is not None
+    assert settings.database_url.get_secret_value() == url
+
+
+def test_database_url_is_not_revealed_by_repr_or_str(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"postgresql+psycopg://user:{PASSWORD}@127.0.0.1/example")
+
+    settings = make_settings()
+
+    assert PASSWORD not in repr(settings)
+    assert PASSWORD not in str(settings)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        f"postgresql://user:{PASSWORD}@127.0.0.1/example",
+        f"mysql+pymysql://user:{PASSWORD}@127.0.0.1/example",
+        f"not a url {PASSWORD}",
+    ],
+)
+def test_rejects_unsupported_database_url_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", bad_url)
+
+    with pytest.raises(ValidationError) as error:
+        make_settings()
+
+    assert PASSWORD not in str(error.value)

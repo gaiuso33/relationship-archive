@@ -2,13 +2,14 @@
 
 A private-by-default, AI-assisted relationship memory application. It helps you remember meaningful details about the people in your life, keep notes, and remember birthdays, while keeping you in control of your information.
 
-The project is at the engineering foundation stage (milestone v0.1.0). The application currently consists of a minimal scaffold: a React frontend and a FastAPI backend with a health endpoint.
+The project is at the engineering foundation stage (milestone v0.1.0). The application currently consists of a minimal scaffold: a React frontend and a FastAPI backend with a health endpoint and a database foundation (connection, migrations and tests, with no application tables yet).
 
 ## Stack
 
 - Frontend: React, TypeScript, Vite (`frontend/`)
 - Backend: Python, FastAPI (`backend/`)
-- Planned: PostgreSQL, SQLAlchemy, Alembic and Supabase Auth, introduced by later issues
+- Database: PostgreSQL 17, SQLAlchemy and Alembic (`backend/`, `compose.yaml`)
+- Planned: Supabase Auth, introduced by later issues
 
 ## Getting started
 
