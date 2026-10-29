@@ -2,5 +2,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability reporting
-    url: https://docs.github.com/en/code-security/security-advisories
-    about: Do not disclose exploitable vulnerabilities in public issues.
+    url: https://github.com/gaiuso33/relationship-archive/security/advisories/new
+    about: Report vulnerabilities privately. Do not disclose exploitable vulnerabilities in public issues.
