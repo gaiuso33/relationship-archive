@@ -54,9 +54,9 @@ A reviewer checks that:
 - the security and privacy checklist holds, for example access checks on private data and no personal data in logs;
 - documentation is updated and the diff contains nothing unrelated.
 
-Merging requires passing CI. The two CI jobs, and the exact check names to require, are **Frontend checks** and **Backend checks**. The maintainer enforces this with a required status checks rule on `main` (tracked in #5).
+Merging requires passing CI. The two CI jobs are **Frontend checks** and **Backend checks**, and `main` requires both to pass before a pull request can be merged.
 
-`main` is protected by a repository ruleset: changes must arrive through a pull request, force pushes and deletion are blocked, and there are no bypass actors. The ruleset does not currently require an approving review, because the maintainer is the only reviewer and GitHub does not allow approving your own pull request. A review is still expected.
+`main` is protected by a repository ruleset: changes must arrive through a pull request, both checks above are required, force pushes and deletion are blocked, and there are no bypass actors. A pull request does not have to be up to date with `main` to merge. The ruleset does not currently require an approving review, because the maintainer is the only reviewer and GitHub does not allow approving your own pull request. A review is still expected.
 
 ## Testing
 
@@ -103,7 +103,7 @@ Treat every relationship record as private personal data.
 - Never commit credentials, tokens, `.env` files or real personal data, and never paste them into issues, pull requests, logs or screenshots.
 - Do not log access tokens or the contents of notes.
 - If you commit a secret, revoke or rotate it immediately. Deleting it in a later commit is not enough, because it stays in the history. Tell the maintainer.
-- Do not report vulnerabilities in public issues or pull requests. Report them privately to the maintainer, gaiuso33.
+- Do not report vulnerabilities in public issues or pull requests. Report them privately with [GitHub private vulnerability reporting](https://github.com/gaiuso33/relationship-archive/security/advisories/new).
 - Do not send personal data to an external AI provider, or build public profile discovery, until the decision records for those areas are accepted. See [ADR-003](docs/decisions/ADR-003-data-and-privacy.md).
 
 ## Architecture and documentation
