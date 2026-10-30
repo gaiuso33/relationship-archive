@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -33,11 +33,22 @@ class Settings(BaseSettings):
     app_name: str = "Relationship Archive API"
     app_env: Literal["development", "test", "production"] = "development"
 
+    # Logging. LOG_LEVEL applies to application loggers only (see app/core/logging.py).
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_format: Literal["json", "text"] = "json"
+
     # Both URLs contain a password, so they are secrets: never log or print them.
     database_url: SecretStr | None = None
     # Used only by the automated tests. It must name a dedicated database whose name ends in
     # `_test`, because the tests create and drop schema objects in it.
     test_database_url: SecretStr | None = None
+
+    @field_validator("log_level", "log_format", mode="before")
+    @classmethod
+    def normalise_case(cls, value: object, info: ValidationInfo) -> object:
+        if not isinstance(value, str):
+            return value
+        return value.strip().upper() if info.field_name == "log_level" else value.strip().lower()
 
     @field_validator("database_url", "test_database_url")
     @classmethod
