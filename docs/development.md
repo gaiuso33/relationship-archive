@@ -145,6 +145,10 @@ npm run build
 
 `npm run build` also type-checks. The separate `typecheck` step exists so a type error is reported on its own.
 
+## Security checks
+
+CI also runs a secret scan and a dependency audit (the "Security" workflow). The commands to run the audits locally, and how findings are triaged, are in [security-checks.md](security-checks.md). Never commit credentials: the secret scan fails the pull request if you do.
+
 ## Before opening a pull request
 
 Run the backend checks (section 4) and the frontend checks (section 5). They must all pass. CI runs them on every pull request.

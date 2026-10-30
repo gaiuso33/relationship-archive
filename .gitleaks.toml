@@ -1,0 +1,31 @@
+# Gitleaks configuration for the "Secret scan" job (.github/workflows/security.yml).
+# Policy, triage and false positives: docs/security-checks.md
+
+title = "Relationship Archive Gitleaks configuration"
+
+[extend]
+# Keep every default Gitleaks rule.
+useDefault = true
+
+# Synthetic canary. CI generates a fresh value at run time (never committed) and requires
+# the scanner to detect it, exit non-zero and redact it, which proves the scanner works.
+# The pattern needs 20 characters after the prefix, so this file does not match itself.
+[[rules]]
+id = "ra-synthetic-canary"
+description = "Synthetic canary used by CI to prove the scanner works. Not a real credential."
+regex = '''RA_CANARY_[A-Z0-9]{20}'''
+keywords = ["ra_canary_"]
+
+# False positives: keep this list short and specific. Every entry must say why it is safe.
+# A real secret is never allowlisted: rotate it instead (docs/security-checks.md).
+[[allowlists]]
+description = "Documented placeholder passwords for throwaway local, CI and test databases"
+regexTarget = "line"
+regexes = [
+  # compose.yaml and .env.example: local development database, bound to 127.0.0.1.
+  '''development-only-password''',
+  # .github/workflows/ci.yml: throwaway PostgreSQL service container that exists for one job.
+  '''ci-only-throwaway-password''',
+  # backend tests: synthetic value used to prove that credentials are not echoed in errors.
+  '''synthetic-password-for-tests''',
+]

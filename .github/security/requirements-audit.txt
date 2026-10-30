@@ -1,0 +1,3 @@
+# Tooling for the "Dependency audit" job in .github/workflows/security.yml.
+# Pinned to an exact version; Dependabot (pip, directory /.github/security) proposes updates.
+pip-audit==2.10.1
