@@ -8,8 +8,9 @@ limited time by adding an entry to `pip-audit-exceptions.json`:
        "owner": "who is responsible", "expires": "YYYY-MM-DD"}
     ]}
 
-Every field is required, `expires` must be in the future and at most MAX_DAYS away,
-and an expired entry fails the job, so an exception can never silently become permanent.
+Every field is required. `expires` must be strictly after today (an entry that expires
+today is already rejected) and at most MAX_DAYS away. A failing entry fails the job, so an
+exception can never silently become permanent.
 Standard library only.
 """
 
@@ -27,7 +28,7 @@ DEFAULT_EXCEPTIONS = Path(__file__).with_name("pip-audit-exceptions.json")
 
 
 class ExceptionsError(Exception):
-    """The exceptions file is malformed or contains an invalid or expired entry."""
+    """The exceptions file is malformed or contains an invalid, expired or too-distant entry."""
 
 
 def load_exceptions(path: Path, today: date) -> list[dict[str, str]]:
@@ -55,8 +56,11 @@ def load_exceptions(path: Path, today: date) -> list[dict[str, str]]:
             expires = date.fromisoformat(entry["expires"])
         except ValueError:
             raise ExceptionsError(f"{label} has an invalid 'expires' (use YYYY-MM-DD)") from None
-        if expires < today:
-            raise ExceptionsError(f"{label} ({entry['id']}) expired on {expires}: fix or renew it")
+        if expires <= today:
+            raise ExceptionsError(
+                f"{label} ({entry['id']}) is not in the future (expires {expires}): "
+                "fix the vulnerability, or renew the exception with a new rationale"
+            )
         if expires > today + timedelta(days=MAX_DAYS):
             raise ExceptionsError(f"{label} expires more than {MAX_DAYS} days from today")
     return entries
