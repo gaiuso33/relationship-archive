@@ -104,7 +104,7 @@ Issues list their dependencies. Do not start an issue whose dependencies are unf
 Treat every relationship record as private personal data.
 
 - Never commit credentials, tokens, `.env` files or real personal data, and never paste them into issues, pull requests, logs or screenshots. The "Secret scan" job checks every pull request; how findings are triaged is in [docs/security-checks.md](docs/security-checks.md).
-- Do not log access tokens or the contents of notes.
+- Do not log access tokens or the contents of notes. The logging and error-handling conventions are in [docs/logging-and-errors.md](docs/logging-and-errors.md).
 - If you commit a secret, revoke or rotate it immediately. Deleting it in a later commit is not enough, because it stays in the history. Tell the maintainer.
 - Do not report vulnerabilities in public issues or pull requests. Report them privately with [GitHub private vulnerability reporting](https://github.com/gaiuso33/relationship-archive/security/advisories/new).
 - Do not send personal data to an external AI provider, or build public profile discovery, until the decision records for those areas are accepted. See [ADR-003](docs/decisions/ADR-003-data-and-privacy.md).

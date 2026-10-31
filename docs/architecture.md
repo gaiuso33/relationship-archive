@@ -207,7 +207,7 @@ Personal records are private by default.
 The application will:
 
 - Collect only data needed for the intended functionality.
-- Avoid logging personal note contents and access tokens.
+- Avoid logging personal note contents and access tokens. Logging and error handling use an allowlist of safe fields and fixed error messages: see [logging-and-errors.md](logging-and-errors.md).
 - Provide a way to export and delete the user's records.
 - Consider deletion across dependent records and backups.
 - Use synthetic fixtures in development and tests.

@@ -38,6 +38,8 @@ The defaults in `.env.example` work with the local database described in [sectio
 |---|---|---|
 | `APP_ENV` | `development` | One of `development`, `test` or `production`. |
 | `DATABASE_URL` | none | Connection URL of the application database. It must start with `postgresql+psycopg://`. It contains a password, so treat it as a secret. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. Applies to application loggers only. |
+| `LOG_FORMAT` | `json` | `json` or `text`. `text` is easier to read while developing, with the same privacy protections. See [logging-and-errors.md](logging-and-errors.md). |
 | `TEST_DATABASE_URL` | none | Connection URL of the dedicated test database. Its name must end in `_test`. Only the automated tests use it. |
 
 Settings are read from real environment variables first and then from the `.env` file in the repository root. Restart the backend after changing them.
@@ -107,6 +109,8 @@ Run the API (with the virtual environment active), then open <http://localhost:8
 ```sh
 uvicorn app.main:app --reload
 ```
+
+The application writes its own privacy-safe logs and replaces uvicorn's access log, so no extra flags are needed. Never add `--log-config` or a custom access log: they could print query strings and client addresses. Conventions: [logging-and-errors.md](logging-and-errors.md).
 
 Checks, the same as CI's "Backend checks" (PostgreSQL must be running, and `DATABASE_URL` and `TEST_DATABASE_URL` set, normally through `.env`):
 

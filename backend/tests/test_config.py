@@ -81,3 +81,33 @@ def test_rejects_unsupported_database_url_without_echoing_it(
         make_settings()
 
     assert PASSWORD not in str(error.value)
+
+
+def test_logging_defaults_to_info_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+
+    settings = make_settings()
+
+    assert settings.log_level == "INFO"
+    assert settings.log_format == "json"
+
+
+def test_logging_settings_are_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+    monkeypatch.setenv("LOG_FORMAT", "TEXT")
+
+    settings = make_settings()
+
+    assert settings.log_level == "DEBUG"
+    assert settings.log_format == "text"
+
+
+@pytest.mark.parametrize(("name", "value"), [("LOG_LEVEL", "verbose"), ("LOG_FORMAT", "xml")])
+def test_rejects_unknown_logging_settings(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError):
+        make_settings()
