@@ -205,7 +205,10 @@ async def handle_http_exception(_: Request, exc: Exception) -> JSONResponse:
 
 async def handle_app_error(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, AppError)
-    return approved_response(exc.code)
+    # RFC 6750: a 401 names the scheme. No error parameter is added, so every authentication
+    # failure looks the same to the client.
+    headers = {"WWW-Authenticate": "Bearer"} if exc.code is ErrorCode.UNAUTHORIZED else None
+    return approved_response(exc.code, headers)
 
 
 # SQLSTATE codes (PostgreSQL appendix A) that describe a conflict with existing data:

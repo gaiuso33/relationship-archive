@@ -40,11 +40,13 @@ The defaults in `.env.example` work with the local database described in [sectio
 | `DATABASE_URL` | none | Connection URL of the application database. It must start with `postgresql+psycopg://`. It contains a password, so treat it as a secret. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. Applies to application loggers only. |
 | `LOG_FORMAT` | `json` | `json` or `text`. `text` is easier to read while developing, with the same privacy protections. See [logging-and-errors.md](logging-and-errors.md). |
+| `SUPABASE_URL` | none | Your Supabase project URL (`https://<project-ref>.supabase.co`). Not a secret. Required in production. In development and test, without it protected endpoints answer 503. See [authentication.md](authentication.md). |
+| `SUPABASE_JWT_AUDIENCE` | `authenticated` | The token audience the backend requires. |
 | `TEST_DATABASE_URL` | none | Connection URL of the dedicated test database. Its name must end in `_test`. Only the automated tests use it. |
 
 Settings are read from real environment variables first and then from the `.env` file in the repository root. Restart the backend after changing them.
 
-Later issues add settings such as Supabase authentication (#10, #11). Each one adds placeholders to `.env.example` and documents where to obtain the real value. Real values live only in your local `.env` or the project's approved secret store.
+Later issues add further settings (for example the frontend's Supabase sign-in in #11). Each one adds placeholders to `.env.example` and documents where to obtain the real value. Real values live only in your local `.env` or the project's approved secret store.
 
 ## 3. Database (PostgreSQL)
 
