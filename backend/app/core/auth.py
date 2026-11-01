@@ -13,16 +13,17 @@ Rules that hold throughout:
   error text never leave this module.
 """
 
+import http.client
 import json
 import logging
+import socket
 import threading
 import time
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
-from urllib.error import URLError
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import jwt
@@ -38,7 +39,7 @@ REQUIRED_ROLE = "authenticated"
 LEEWAY_SECONDS = 30
 REQUIRED_CLAIMS = ("exp", "sub", "iss", "aud")
 
-# JWKS fetching limits.
+# JWKS fetching limits. The timeout is a total deadline for the whole fetch.
 JWKS_TIMEOUT_SECONDS = 3.0
 # Supabase says not to cache keys in the application for longer than its own edge cache.
 JWKS_TTL_SECONDS = 300.0
@@ -47,6 +48,7 @@ JWKS_REFRESH_COOLDOWN_SECONDS = 30.0
 # After a failed fetch, wait before trying again so a down endpoint is not hammered.
 JWKS_FAILURE_BACKOFF_SECONDS = 5.0
 JWKS_MAX_BYTES = 64 * 1024
+JWKS_CHUNK_BYTES = 4096
 JWKS_MAX_KEYS = 20
 
 
@@ -109,25 +111,88 @@ class SigningKeyProvider(Protocol):
 # --- JWKS key provider -----------------------------------------------------------------
 
 
-class _NoRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
+def _abort_connection(sock: socket.socket | None, expired: threading.Event) -> None:
+    """Called by the watchdog at the deadline: wake any read that is blocked on the socket."""
+    expired.set()
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
 
 def fetch_jwks_bytes(url: str, timeout: float, max_bytes: int) -> bytes:
-    """GET the key set: bounded in time and size, and never following a redirect."""
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
-    opener = urllib.request.build_opener(_NoRedirects())
+    """GET the key set: bounded in time and size, and never following a redirect.
+
+    `timeout` is a total wall-clock deadline for the whole fetch, not a per-read timeout. A
+    server that sends a byte at a time, each inside the per-read timeout, cannot hold the
+    caller (and the provider lock) beyond it:
+
+    * the body is read in small chunks, and the remaining time is checked before each one;
+    * a watchdog timer also shuts the socket down at the deadline, which covers a server that
+      drips the response headers.
+
+    The connection is made directly: proxy environment variables are not used, and a redirect
+    is an error (the status must be 200).
+    """
+    deadline = time.monotonic() + timeout
+    parts = urlsplit(url)
+    connection_class = {"https": http.client.HTTPSConnection, "http": http.client.HTTPConnection}
     try:
-        with opener.open(request, timeout=timeout) as response:
-            if response.status != 200:
-                raise KeyUnavailable
-            body = response.read(max_bytes + 1)
-    except (URLError, OSError, ValueError):
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
         raise KeyUnavailable from None
-    if len(body) > max_bytes:
+    if parts.scheme not in connection_class or not host:
         raise KeyUnavailable
-    return body
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+    connection = connection_class[parts.scheme](host, port, timeout=timeout)
+    expired = threading.Event()
+    watchdog: threading.Timer | None = None
+    chunks: list[bytes] = []
+    try:
+        connection.connect()
+        sock = connection.sock
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KeyUnavailable
+        watchdog = threading.Timer(remaining, _abort_connection, args=(sock, expired))
+        watchdog.daemon = True
+        watchdog.start()
+
+        connection.request("GET", target, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise KeyUnavailable
+        declared = response.getheader("Content-Length")
+        total = 0
+        # The response closes itself once the declared length has been read, and the socket
+        # may not be used after that.
+        while not response.isclosed():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or expired.is_set():
+                raise KeyUnavailable
+            sock.settimeout(remaining)
+            chunk = response.read1(min(JWKS_CHUNK_BYTES, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise KeyUnavailable
+            chunks.append(chunk)
+        if declared is not None and (not declared.isdigit() or total != int(declared)):
+            raise KeyUnavailable  # a short or inconsistent body is never trusted
+        if expired.is_set():
+            # The watchdog cut the connection: what was read is incomplete, whatever it looks like.
+            raise KeyUnavailable
+    except (OSError, http.client.HTTPException, ValueError):
+        raise KeyUnavailable from None
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        connection.close()
+    return b"".join(chunks)
 
 
 class JwksKeyProvider:

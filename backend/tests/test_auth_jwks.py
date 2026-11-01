@@ -4,7 +4,11 @@ The network tests use a loopback server run by the test itself. No Supabase proj
 involved, and nothing leaves the machine.
 """
 
+import datetime
+import ipaddress
 import json
+import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -12,6 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.x509.oid import NameOID
 
 from app.core.auth import (
     JwksKeyProvider,
@@ -214,6 +221,15 @@ def test_key_set_size_is_bounded() -> None:
 # --- real HTTP against a loopback server -----------------------------------------------
 
 
+# A drip-feed server sends one byte every DRIP_GAP seconds. With a total deadline of 1 second,
+# every single read finishes well inside it (0.2 s), yet the response would take DRIP_TOTAL
+# (20 s) to arrive, so only a total deadline stops it.
+DRIP_GAP = 0.2
+DRIP_BYTES = 100
+DRIP_TOTAL = DRIP_GAP * DRIP_BYTES
+DEADLINE = 1.0
+
+
 class Server:
     def __init__(self) -> None:
         self.mode = "ok"
@@ -235,6 +251,43 @@ class Server:
                 elif outer.mode == "error":
                     self.send_response(500)
                     self.end_headers()
+                elif outer.mode == "drip_body":
+                    # Headers at once, then one byte every DRIP_GAP seconds: every single read
+                    # finishes inside a per-read timeout, but the whole body takes DRIP_TOTAL.
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(DRIP_BYTES))
+                    self.end_headers()
+                    self.drip(b"x" * DRIP_BYTES)
+                elif outer.mode == "drip_headers":
+                    self.drip(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                elif outer.mode == "error_with_body":
+                    self.send_response(500)
+                    self.send_header("Content-Length", str(len(outer.body)))
+                    self.end_headers()
+                    self.wfile.write(outer.body)
+                elif outer.mode == "redirect_with_body":
+                    self.send_response(302)
+                    self.send_header("Location", "/trap")
+                    self.send_header("Content-Length", str(len(outer.body)))
+                    self.end_headers()
+                    self.wfile.write(outer.body)
+                elif outer.mode == "stream_big":
+                    # No Content-Length: the body ends when the connection closes.
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b" " * 5000 + outer.body)
+                elif outer.mode == "short_body":
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(outer.body) + 500))
+                    self.end_headers()
+                    self.wfile.write(outer.body)  # valid JSON, but fewer bytes than declared
+                elif outer.mode == "valid_then_drip":
+                    # A complete key set, then the response never ends (no Content-Length).
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(outer.body)
+                    self.wfile.flush()
+                    self.drip(b" " * DRIP_BYTES)
                 elif outer.mode == "slow":
                     time.sleep(1.5)
                     self.send_response(200)
@@ -245,6 +298,15 @@ class Server:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+
+            def drip(self, data: bytes) -> None:
+                try:
+                    for index in range(len(data)):
+                        self.wfile.write(data[index : index + 1])
+                        self.wfile.flush()
+                        time.sleep(DRIP_GAP)
+                except OSError:
+                    pass  # the client gave up, which is what the tests expect
 
             def log_message(self, *args: Any) -> None:
                 pass
@@ -331,3 +393,147 @@ def test_a_jku_header_never_makes_the_verifier_fetch_from_that_address(server: S
     finally:
         trap.httpd.shutdown()
         trap.httpd.server_close()
+
+
+# --- total deadline against drip-feed responses ----------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["drip_body", "drip_headers"])
+def test_the_timeout_is_a_total_deadline_not_a_per_read_timeout(server: Server, mode) -> None:
+    assert DRIP_GAP < DEADLINE < DRIP_TOTAL  # each read is fast; the whole response is not
+    server.mode = mode
+    started = time.monotonic()
+
+    with pytest.raises(KeyUnavailable):
+        fetch_jwks_bytes(server.url, DEADLINE, 64 * 1024)
+
+    elapsed = time.monotonic() - started
+    assert DEADLINE * 0.8 <= elapsed < DEADLINE + 1.0, f"took {elapsed:.2f}s"
+
+
+def test_a_drip_fed_refresh_fails_closed_and_never_serves_the_expired_keys(server: Server) -> None:
+    clock = Clock()
+    keys = JwksKeyProvider(server.url, timeout=DEADLINE, ttl=300, clock=clock)
+    assert keys.get_key(a.KID) is not None  # a normal fetch fills the cache
+    server.mode = "drip_body"
+    clock.now += 301  # the cached keys have expired
+    started = time.monotonic()
+
+    with pytest.raises(KeyUnavailable):
+        keys.get_key(a.KID)
+
+    assert time.monotonic() - started < DEADLINE + 1.0
+
+
+def test_a_body_shorter_than_declared_is_refused(server: Server) -> None:
+    server.mode = "drip_body"  # declares 100 bytes, gives up after the deadline, never complete
+
+    with pytest.raises(KeyUnavailable):
+        fetch_jwks_bytes(server.url, 0.5, 64 * 1024)
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_the_total_deadline_also_holds_over_tls(tmp_path, monkeypatch, phase) -> None:
+    """Production fetches use HTTPS, so check the watchdog on a TLS socket too.
+
+    A throw-away certificate for 127.0.0.1 is generated here and trusted only for this
+    process through SSL_CERT_FILE; certificate verification stays on.
+    """
+    key = a.new_ec_key()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - datetime.timedelta(minutes=1))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_file, key_file = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_file.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_file.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    head = b"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n" % DRIP_BYTES
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+            with context.wrap_socket(connection, server_side=True) as tls:
+                tls.recv(4096)
+                payload = head + b"x" * DRIP_BYTES
+                if phase == "body":
+                    tls.sendall(head)
+                    payload = payload[len(head) :]
+                for index in range(len(payload)):
+                    tls.sendall(payload[index : index + 1])
+                    time.sleep(DRIP_GAP)
+        except OSError:
+            pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert_file))
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyUnavailable):
+            fetch_jwks_bytes(f"https://127.0.0.1:{listener.getsockname()[1]}/jwks", DEADLINE, 65536)
+    finally:
+        listener.close()
+
+    elapsed = time.monotonic() - started
+    # Not an immediate certificate failure, and not the length of the drip.
+    assert DEADLINE * 0.8 <= elapsed < DEADLINE + 1.0, f"took {elapsed:.2f}s"
+
+
+# --- the fetch itself must refuse these, whatever the caller does with the body --------
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "error_with_body",  # a valid key set sent with an error status
+        "redirect_with_body",  # a valid key set sent with a redirect
+        "short_body",  # fewer bytes than the response declared
+    ],
+)
+def test_fetch_refuses_responses_that_are_not_a_complete_200(server: Server, mode) -> None:
+    server.mode = mode
+
+    with pytest.raises(KeyUnavailable):
+        fetch_jwks_bytes(server.url, 3.0, 64 * 1024)
+    assert "/trap" not in server.hits
+
+
+def test_fetch_enforces_the_size_cap_when_no_length_is_declared(server: Server) -> None:
+    server.mode = "stream_big"
+
+    with pytest.raises(KeyUnavailable):
+        fetch_jwks_bytes(server.url, 3.0, 1000)
+
+
+def test_a_response_that_never_ends_is_refused_even_if_what_arrived_is_valid(
+    server: Server,
+) -> None:
+    server.mode = "valid_then_drip"
+    assert DEADLINE < DRIP_TOTAL
+    started = time.monotonic()
+
+    with pytest.raises(KeyUnavailable):
+        fetch_jwks_bytes(server.url, DEADLINE, 64 * 1024)
+
+    assert time.monotonic() - started < DEADLINE + 1.0

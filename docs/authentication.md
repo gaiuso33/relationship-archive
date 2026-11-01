@@ -44,6 +44,8 @@ A rejection logs one WARNING with a fixed event name such as `auth_rejected_expi
 | `SUPABASE_URL` | none | The project origin, for example `https://<project-ref>.supabase.co`, with no path. Not a secret. Required in production (the application will not start without it). In development and test a missing value leaves protected endpoints answering 503. `http://` is accepted only for localhost outside production. |
 | `SUPABASE_JWT_AUDIENCE` | `authenticated` | The `aud` value the backend requires. Leave the default unless your project differs. |
 
+The key fetch has a **total** time limit of 3 seconds (a response that arrives a byte at a time is cut off at that limit), a 64 KiB size cap, and refuses redirects. It connects directly to `SUPABASE_URL`: proxy environment variables such as `HTTPS_PROXY` are not used.
+
 The backend needs **no** Supabase key. Never put the service-role key, the legacy JWT secret or any other privileged value in backend configuration for this purpose, and never expose them to the frontend. The frontend's own settings arrive with #11.
 
 ## Checking your real Supabase project
