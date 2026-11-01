@@ -9,7 +9,7 @@ The project is at the engineering foundation stage (milestone v0.1.0). The appli
 - Frontend: React, TypeScript, Vite (`frontend/`)
 - Backend: Python, FastAPI (`backend/`)
 - Database: PostgreSQL 17, SQLAlchemy and Alembic (`backend/`, `compose.yaml`)
-- Planned: Supabase Auth, introduced by later issues
+- Supabase Auth: the backend verifies access tokens ([authentication.md](docs/authentication.md)); sign-in screens come later
 
 ## Getting started
 

@@ -51,6 +51,8 @@ Every error has the same shape:
 | Request validation (422) | 422 | `validation_error`, plus `fields` |
 | `HTTPException` or routing error (404, 405 and so on) | as raised | from the status; the `detail` is never used. Only `WWW-Authenticate`, `Allow` and `Retry-After` headers are kept |
 | `AppError(ErrorCode.X)` | from the table | `x` |
+| Missing, invalid or expired access token | 401 | `unauthorized`, with `WWW-Authenticate: Bearer`; see [authentication.md](authentication.md) |
+| Token signing keys unavailable, or Supabase not configured | 503 | `service_unavailable` |
 
 Validation errors list only the **location and type** of each problem, for example `{"loc": ["body", "rating"], "type": "int_parsing"}`. The submitted value, FastAPI's `input`, and the message text are never returned. An unexpected field name chosen by the client is replaced with `<unknown field>`. Limitation: keys of a free-form dictionary field cannot be told apart from declared field names, so avoid dictionary-typed request fields for private data, or review them.
 

@@ -184,6 +184,8 @@ Database access should be structured so ownership checks are difficult to omit. 
 
 Authentication and authorization are separate concerns; both must be implemented and tested.
 
+The verification approach is recorded in [ADR-004](decisions/ADR-004-token-verification.md) and described in [authentication.md](authentication.md): local verification of Supabase's asymmetric (JWKS) signing keys, `401` for a bad token and `503` when verification itself is unavailable.
+
 ## 8. Database and migrations
 
 PostgreSQL will be the persistent source of truth.
@@ -282,7 +284,6 @@ The core archive must remain usable when AI services are unavailable.
 The following remain unresolved until reviewed and documented:
 
 - Hosting provider and deployment topology.
-- Exact authentication token verification implementation.
 - Database hosting, backup, and recovery plan.
 - Notification delivery provider.
 - AI provider and personal-data processing boundaries.

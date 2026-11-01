@@ -9,8 +9,9 @@ application logic.
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import SecretStr, ValidationInfo, field_validator
+from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -19,6 +20,7 @@ from sqlalchemy.exc import ArgumentError
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 DATABASE_DRIVER = "postgresql+psycopg"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class Settings(BaseSettings):
@@ -43,6 +45,12 @@ class Settings(BaseSettings):
     # `_test`, because the tests create and drop schema objects in it.
     test_database_url: SecretStr | None = None
 
+    # Supabase Auth (ADR-004). The project URL is public information, not a secret. The backend
+    # needs no Supabase key of any kind: access tokens are verified with the project's public
+    # signing keys. Never add a service-role key or the legacy JWT secret here.
+    supabase_url: str | None = None
+    supabase_jwt_audience: str = "authenticated"
+
     @field_validator("log_level", "log_format", mode="before")
     @classmethod
     def normalise_case(cls, value: object, info: ValidationInfo) -> object:
@@ -63,6 +71,59 @@ class Settings(BaseSettings):
         if driver != DATABASE_DRIVER:
             raise ValueError(f"the database URL must start with {DATABASE_DRIVER}://")
         return value
+
+    @field_validator("supabase_url", mode="before")
+    @classmethod
+    def normalise_supabase_url(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("the Supabase URL must be text")
+        value = value.strip()
+        if not value:
+            return None  # An empty variable in `.env` means "not configured".
+        try:
+            parts = urlsplit(value)
+            host, port = parts.hostname, parts.port
+        except ValueError:
+            raise ValueError("the Supabase URL is not valid") from None
+        if parts.scheme not in {"https", "http"} or not host:
+            raise ValueError("the Supabase URL must be an https URL")
+        if parts.username or parts.password or parts.query or parts.fragment:
+            raise ValueError("the Supabase URL must not contain credentials, query or fragment")
+        if parts.path not in {"", "/"}:
+            raise ValueError("the Supabase URL must be the project origin, without a path")
+        shown_host = f"[{host}]" if ":" in host else host
+        return f"{parts.scheme}://{shown_host}" + (f":{port}" if port else "")
+
+    @field_validator("supabase_jwt_audience")
+    @classmethod
+    def require_audience(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("the audience must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def check_supabase_url_for_environment(self) -> "Settings":
+        if self.app_env == "production" and self.supabase_url is None:
+            raise ValueError("SUPABASE_URL is required in production")
+        if self.supabase_url is not None and self.supabase_url.startswith("http://"):
+            host = urlsplit(self.supabase_url).hostname
+            if self.app_env == "production" or host not in LOOPBACK_HOSTS:
+                raise ValueError("the Supabase URL must use https (http is allowed only locally)")
+        return self
+
+    @property
+    def supabase_issuer(self) -> str | None:
+        """The `iss` claim that Supabase Auth puts in access tokens for this project."""
+        return f"{self.supabase_url}/auth/v1" if self.supabase_url else None
+
+    @property
+    def supabase_jwks_url(self) -> str | None:
+        """Where the project publishes its public signing keys. Derived from configuration
+        only, never from a token."""
+        return f"{self.supabase_issuer}/.well-known/jwks.json" if self.supabase_url else None
 
 
 @lru_cache
