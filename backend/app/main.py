@@ -31,7 +31,7 @@ def build_token_verifier(
     if issuer is None or jwks_url is None:
         return None
     return TokenVerifier(
-        key_provider or JwksKeyProvider(jwks_url),
+        key_provider or JwksKeyProvider(jwks_url, timeout=settings.supabase_jwks_timeout_seconds),
         issuer=issuer,
         audience=settings.supabase_jwt_audience,
     )

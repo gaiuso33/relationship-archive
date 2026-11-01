@@ -25,13 +25,13 @@ import jwt
 
 from app.core.auth import (
     JWKS_MAX_BYTES,
-    JWKS_TIMEOUT_SECONDS,
     AuthenticationFailed,
+    FailureCategory,
+    JwksFetcher,
     JwksKeyProvider,
     KeyUnavailable,
     SigningKeyProvider,
     TokenVerifier,
-    fetch_jwks_bytes,
 )
 from app.core.config import Settings, get_settings
 
@@ -104,11 +104,28 @@ def describe_token(token: str, settings: Settings, key_ids: set[str]) -> list[st
     ]
 
 
+# One fixed sentence per failure category. Nothing from the network or from an exception is shown.
+KEY_FAILURE_MESSAGES: dict[FailureCategory, str] = {
+    FailureCategory.DNS: "Could not fetch the signing keys: the host name could not be resolved.",
+    FailureCategory.CONNECT: "Could not fetch the signing keys: no connection could be made.",
+    FailureCategory.TLS: "Could not fetch the signing keys: the TLS or certificate check failed.",
+    FailureCategory.STATUS: "Could not fetch the signing keys: the server did not answer HTTP 200.",
+    FailureCategory.DEADLINE: (
+        "Could not fetch the signing keys: the time limit expired "
+        "(raise SUPABASE_JWKS_TIMEOUT_SECONDS if your network is slow, up to 30)."
+    ),
+    FailureCategory.SIZE: "Could not fetch the signing keys: the response was too large.",
+    FailureCategory.BODY: (
+        "Could not fetch the signing keys: the response was incomplete or unusable."
+    ),
+}
+
+
 def run(
     settings: Settings,
     read_token: Callable[[str], str] = getpass.getpass,
     keys: SigningKeyProvider | None = None,
-    fetch: Callable[[str, float, int], bytes] = fetch_jwks_bytes,
+    fetch: Callable[[str, float, int], bytes] | None = None,
     out: Callable[[str], Any] = print,
 ) -> int:
     if not settings.supabase_url or not settings.supabase_jwks_url:
@@ -117,9 +134,11 @@ def run(
     out(f"Project: {settings.supabase_url}")
     key_ids: set[str] = set()
     try:
-        body = fetch(settings.supabase_jwks_url, JWKS_TIMEOUT_SECONDS, JWKS_MAX_BYTES)
-    except KeyUnavailable:
-        out("Could not fetch the signing keys (network, URL or project problem).")
+        body = (fetch or JwksFetcher())(
+            settings.supabase_jwks_url, settings.supabase_jwks_timeout_seconds, JWKS_MAX_BYTES
+        )
+    except KeyUnavailable as exc:
+        out(KEY_FAILURE_MESSAGES[exc.category])
         return 2
     for line in describe_keys(body):
         out(line)
@@ -137,15 +156,17 @@ def run(
 
     issuer = settings.supabase_issuer
     assert issuer is not None
-    provider = keys or JwksKeyProvider(settings.supabase_jwks_url)
+    provider = keys or JwksKeyProvider(
+        settings.supabase_jwks_url, timeout=settings.supabase_jwks_timeout_seconds
+    )
     verifier = TokenVerifier(provider, issuer=issuer, audience=settings.supabase_jwt_audience)
     try:
         verifier.verify(token)
     except AuthenticationFailed as exc:
         out(f"The backend would REJECT this token: {exc.reason.value}")
         return 1
-    except KeyUnavailable:
-        out("The backend could not obtain signing keys, so it would answer 503.")
+    except KeyUnavailable as exc:
+        out(f"The backend could not obtain signing keys ({exc.category.value}): answer 503.")
         return 2
     out("The backend would ACCEPT this token.")
     return 0

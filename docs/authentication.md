@@ -35,7 +35,7 @@ Both use the standard error body with a `request_id` that matches the `X-Request
 
 ## Logging
 
-A rejection logs one WARNING with a fixed event name such as `auth_rejected_expired` or `auth_rejected_bad_audience`, and nothing else about the request. A key problem logs `auth_keys_unavailable` with the exception type and frames only (no URL or error text). A missing configuration logs `auth_not_configured`. Tokens, the `Authorization` header and claims are never passed to a logger. The access log already records the status (401 or 503) and the route template.
+A rejection logs one WARNING with a fixed event name such as `auth_rejected_expired` or `auth_rejected_bad_audience`, and nothing else about the request. A key problem logs `auth_keys_unavailable_<category>` (see [Fetching the signing keys](#fetching-the-signing-keys)) with the exception type and frames only (no URL or error text). A missing configuration logs `auth_not_configured`. Tokens, the `Authorization` header and claims are never passed to a logger. The access log already records the status (401 or 503) and the route template.
 
 ## Configuration
 
@@ -43,8 +43,29 @@ A rejection logs one WARNING with a fixed event name such as `auth_rejected_expi
 |---|---|---|
 | `SUPABASE_URL` | none | The project origin, for example `https://<project-ref>.supabase.co`, with no path. Not a secret. Required in production (the application will not start without it). In development and test a missing value leaves protected endpoints answering 503. `http://` is accepted only for localhost outside production. |
 | `SUPABASE_JWT_AUDIENCE` | `authenticated` | The `aud` value the backend requires. Leave the default unless your project differs. |
+| `SUPABASE_JWKS_TIMEOUT_SECONDS` | `10` | Total time allowed for one fetch of the signing keys, from 1 to 30 seconds. A missing or empty value means 10. Zero, negative, non-numeric, `nan`, `inf` and out-of-range values stop the application from starting, without echoing the value. The limit cannot be switched off. |
 
-The key fetch has a **total** time limit of 3 seconds (a response that arrives a byte at a time is cut off at that limit), a 64 KiB size cap, and refuses redirects. It connects directly to `SUPABASE_URL`: proxy environment variables such as `HTTPS_PROXY` are not used.
+### Fetching the signing keys
+
+One fetch has a single **total** deadline (`SUPABASE_JWKS_TIMEOUT_SECONDS`, 10 seconds by default). It covers name resolution (DNS), connect, TLS, the response headers and the body together, so a slow resolver, a slow server or a response that arrives a byte at a time is cut off at the deadline. A response that is slow but complete inside the deadline is accepted. In addition, each connect attempt and each read may take at most 3 seconds, and never longer than the time left. The response must be HTTP 200 and at most 64 KiB, and redirects are refused. Certificates are verified against the project's host name. It connects directly to `SUPABASE_URL`: proxy environment variables such as `HTTPS_PROXY` are not used.
+
+**Time budget and the lock.** The key provider holds its lock while it refreshes, so other requests that need keys wait behind a refresh for up to the deadline. This is the cost of a larger deadline: with the default it is at most 10 seconds, with 30 it is at most 30. Raise the setting only if your network needs it (the diagnostic below tells you when the deadline was the problem). After a failed fetch there is no new attempt for 5 seconds, and keys that have expired are never served.
+
+**The resolver cannot be cancelled.** The operating system's name lookup (`getaddrinfo`) has no timeout and cannot be interrupted. The lookup therefore runs in a helper thread and the caller waits for it only until the deadline, then gives up and releases the lock. The abandoned lookup keeps running until the resolver returns, and its answer is discarded. At most one lookup is in flight per provider: while one is outstanding, later fetches wait for that same lookup (within their own deadlines) instead of starting another, so repeated timeouts cannot pile up threads. A caller whose lookup times out returns within the deadline plus a scheduling tolerance (the tests allow 1 second for thread start-up and a loaded runner).
+
+**Failure categories.** A failed fetch is reported only as one of these fixed words, chosen by our code and never taken from an error message or from anything the network sent:
+
+| Category | Meaning |
+|---|---|
+| `dns` | The resolver returned an error or no addresses. |
+| `connect` | No address could be connected to within the per-attempt limit. |
+| `tls` | The TLS handshake, certificate or host-name check failed. |
+| `status` | The response was not HTTP 200 (including redirects). |
+| `deadline` | The total deadline expired, in any phase. |
+| `size` | The response was larger than 64 KiB. |
+| `body` | The body was incomplete, inconsistent with its declared length, or not a usable key set. |
+
+The log event is `auth_keys_unavailable_<category>` (for example `auth_keys_unavailable_deadline`). The API answer is always the generic `503 service_unavailable`; the category is not in the response. `python -m app.tools.check_token` prints one fixed sentence per category.
 
 The backend needs **no** Supabase key. Never put the service-role key, the legacy JWT secret or any other privileged value in backend configuration for this purpose, and never expose them to the frontend. The frontend's own settings arrive with #11.
 

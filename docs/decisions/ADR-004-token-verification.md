@@ -1,9 +1,15 @@
 # ADR-004: Supabase Access Token Verification
 
-- **Status:** Proposed. The project maintainer approved this direction on 2026-11-01 (issue #10); it becomes Accepted when the #10 pull request is merged.
+- **Status:** Accepted: 2026-11-01, on merge of PR #64 (merge commit 7c1c578). Item 9 amended by issue #65 (see Status history).
 - **Date:** 2026-11-01
 - **Decision owners:** Project maintainer
 - **Relates to:** [ADR-002](ADR-002-authentication-and-authorization.md), which requires server-side token verification with a supported, maintained approach and leaves the choice to #10.
+
+## Status history
+
+- **Proposed, 2026-11-01.** The project maintainer approved the direction in issue #10; it was to become Accepted when the #10 pull request was merged.
+- **Accepted, 2026-11-01,** on merge of PR #64 (merge commit 7c1c578).
+- **Item 9 amended, issue #65.** The original item 9 read: "**JWKS handling limits:** 3 second timeout; response size at most 64 KiB; no redirects; at most 20 keys; keys cached for 5 minutes (Supabase says not to cache longer than its own 10 minute edge cache unless the cache can be purged); at most one forced refresh per 30 seconds however many unknown key ids arrive; no new fetch for 5 seconds after a failure; expired keys are never served after a failed refresh." The fixed 3 second total did not leave room for DNS on a slow network (measured: about 5 seconds for DNS alone), so the first real-project check failed closed before any request was sent. Only the time limit changed; every other limit is as before.
 
 ## Context
 
@@ -23,7 +29,13 @@ The backend must decide who is calling from the access token the frontend sends.
 8. **Failure behaviour (never fail open):**
    - A missing, malformed, expired, wrongly signed or otherwise unacceptable token gives `401`, the same body every time, with `WWW-Authenticate: Bearer`.
    - If the keys cannot be obtained (endpoint unreachable, timeout, error status, oversized or malformed response, no keys published, or Supabase not configured) the answer is `503 service_unavailable`.
-9. **JWKS handling limits:** 3 second timeout; response size at most 64 KiB; no redirects; at most 20 keys; keys cached for 5 minutes (Supabase says not to cache longer than its own 10 minute edge cache unless the cache can be purged); at most one forced refresh per 30 seconds however many unknown key ids arrive; no new fetch for 5 seconds after a failure; expired keys are never served after a failed refresh.
+9. **JWKS handling limits (amended by #65):**
+   - **One total wall-clock deadline** covers the whole fetch: DNS, connect, TLS, response headers and body. The default is 10 seconds, configurable from 1 to 30 seconds with `SUPABASE_JWKS_TIMEOUT_SECONDS`, and it cannot be disabled.
+   - Connect and read timeouts are fixed at 3 seconds each and are capped by the time left in the total deadline.
+   - The DNS lookup runs in a helper thread, at most one in flight per key provider. The operating system's resolver call cannot be cancelled, so a lookup that outlives its caller finishes on its own and its result is discarded. The caller waits only until the deadline.
+   - Response size at most 64 KiB; no redirects; the status must be 200; at most 20 keys.
+   - Keys are cached for 5 minutes (Supabase says not to cache longer than its own 10 minute edge cache unless the cache can be purged); at most one forced refresh per 30 seconds however many unknown key ids arrive; no new fetch for 5 seconds after a failure; expired keys are never served after a failed refresh.
+   - Failures are reported only as one of seven fixed categories (`dns`, `connect`, `tls`, `status`, `deadline`, `size`, `body`), set by our code. No exception text, host name, address, URL or response content is logged or shown. The API answer stays the generic `503 service_unavailable`.
 10. **Configuration:** `SUPABASE_URL` (the project origin, `https`; plain `http` only for loopback outside production) and optionally `SUPABASE_JWT_AUDIENCE`. In production the application refuses to start if `SUPABASE_URL` is missing or invalid. In development and test a missing value does not stop the application; protected endpoints answer 503.
 11. **The backend holds no Supabase secret.** It does not need the service-role key, the legacy JWT secret or the publishable key, and none of them may be added to backend configuration for token verification.
 12. **Authentication only.** This decision identifies the caller. Ownership and authorization of people and notes remain the responsibility of each endpoint (#12 onwards), as ADR-002 requires. `GET /api/v1/me` is a permanent endpoint that returns only the caller's `user_id`.
@@ -42,6 +54,8 @@ The backend must decide who is calling from the access token the frontend sends.
 - A project still on the legacy secret publishes no keys. Every protected request then returns 503 until asymmetric signing keys are enabled.
 - A newly rotated key can take a few minutes to be served, bounded by the Supabase edge cache and our 30 second refresh cooldown.
 - Revoking a signing key takes effect for us after our cache expires (at most 5 minutes).
+- The provider lock is held during a refresh, so for up to the configured deadline (10 seconds by default) other requests that need keys wait behind it. A fetch that fails still ends within the deadline, and the 5 second failure backoff then stops further attempts. Raising the deadline raises this worst case.
+- A DNS lookup that times out can keep one background thread alive until the operating system's resolver returns. There is never more than one per provider, because new lookups wait for the outstanding one.
 
 ## Review conditions
 

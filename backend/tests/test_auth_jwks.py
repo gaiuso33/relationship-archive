@@ -228,6 +228,7 @@ DRIP_GAP = 0.2
 DRIP_BYTES = 100
 DRIP_TOTAL = DRIP_GAP * DRIP_BYTES
 DEADLINE = 1.0
+SLOW_OK_DELAY = 1.5  # a valid response that starts later than DEADLINE
 
 
 class Server:
@@ -288,6 +289,13 @@ class Server:
                     self.wfile.write(outer.body)
                     self.wfile.flush()
                     self.drip(b" " * DRIP_BYTES)
+                elif outer.mode == "slow_ok":
+                    # A complete, valid answer that simply takes a while to start.
+                    time.sleep(SLOW_OK_DELAY)
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(outer.body)))
+                    self.end_headers()
+                    self.wfile.write(outer.body)
                 elif outer.mode == "slow":
                     time.sleep(1.5)
                     self.send_response(200)

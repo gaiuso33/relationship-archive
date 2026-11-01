@@ -60,7 +60,8 @@ def require_user(request: Request) -> AuthenticatedUser:
         logger.warning(event, extra={"event": event})
         raise AppError(ErrorCode.UNAUTHORIZED) from None
     except KeyUnavailable as exc:
-        log_error("auth_keys_unavailable", exc, logging.ERROR)
+        # The category is a fixed word (dns, connect, tls, status, deadline, size, body).
+        log_error(f"auth_keys_unavailable_{exc.category.value}", exc, logging.ERROR)
         raise AppError(ErrorCode.SERVICE_UNAVAILABLE) from None
 
 
