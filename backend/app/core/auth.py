@@ -14,9 +14,11 @@ Rules that hold throughout:
 """
 
 import http.client
+import ipaddress
 import json
 import logging
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -27,6 +29,8 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import jwt
+
+from app.core.config import JWKS_TIMEOUT_DEFAULT_SECONDS
 
 logger = logging.getLogger("app.auth")
 
@@ -39,8 +43,11 @@ REQUIRED_ROLE = "authenticated"
 LEEWAY_SECONDS = 30
 REQUIRED_CLAIMS = ("exp", "sub", "iss", "aud")
 
-# JWKS fetching limits. The timeout is a total deadline for the whole fetch.
-JWKS_TIMEOUT_SECONDS = 3.0
+# JWKS fetching limits. The total deadline for one fetch (DNS, connect, TLS, headers and body)
+# is the `SUPABASE_JWKS_TIMEOUT_SECONDS` setting. Each connect attempt and each read may also
+# take at most these many seconds, and never longer than the time left in the total deadline.
+JWKS_CONNECT_TIMEOUT_SECONDS = 3.0
+JWKS_READ_TIMEOUT_SECONDS = 3.0
 # Supabase says not to cache keys in the application for longer than its own edge cache.
 JWKS_TTL_SECONDS = 300.0
 # At most one forced refresh per interval, however many unknown key ids arrive.
@@ -84,8 +91,30 @@ class AuthenticationFailed(Exception):
         self.reason = reason
 
 
+class FailureCategory(StrEnum):
+    """Why the signing keys could not be obtained. Fixed words, safe to log and print.
+
+    Set only by our own code, never from exception text or anything the network returned.
+    """
+
+    DNS = "dns"  # the resolver returned an error or no addresses
+    CONNECT = "connect"  # no address could be connected to
+    TLS = "tls"  # the TLS handshake or certificate or host name verification failed
+    STATUS = "status"  # the response status was not 200 (including redirects)
+    DEADLINE = "deadline"  # the total deadline expired, in any phase
+    SIZE = "size"  # the response was larger than allowed
+    BODY = "body"  # incomplete, inconsistent with its declared length, or not a usable key set
+
+
 class KeyUnavailable(Exception):
-    """The signing keys cannot be obtained right now (HTTP 503). Never treated as success."""
+    """The signing keys cannot be obtained right now (HTTP 503). Never treated as success.
+
+    Carries only a `FailureCategory`, so nothing from the network can travel with it.
+    """
+
+    def __init__(self, category: FailureCategory = FailureCategory.BODY) -> None:
+        super().__init__()
+        self.category = category
 
 
 class UnknownKey(Exception):
@@ -111,9 +140,10 @@ class SigningKeyProvider(Protocol):
 # --- JWKS key provider -----------------------------------------------------------------
 
 
-def _abort_connection(sock: socket.socket | None, expired: threading.Event) -> None:
+def _abort_connection(holder: list[socket.socket | None], expired: threading.Event) -> None:
     """Called by the watchdog at the deadline: wake any read that is blocked on the socket."""
     expired.set()
+    sock = holder[0]
     if sock is not None:
         try:
             sock.shutdown(socket.SHUT_RDWR)
@@ -121,78 +151,290 @@ def _abort_connection(sock: socket.socket | None, expired: threading.Event) -> N
             pass
 
 
-def fetch_jwks_bytes(url: str, timeout: float, max_bytes: int) -> bytes:
-    """GET the key set: bounded in time and size, and never following a redirect.
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise KeyUnavailable(FailureCategory.DEADLINE)
+    return remaining
 
-    `timeout` is a total wall-clock deadline for the whole fetch, not a per-read timeout. A
-    server that sends a byte at a time, each inside the per-read timeout, cannot hold the
-    caller (and the provider lock) beyond it:
 
-    * the body is read in small chunks, and the remaining time is checked before each one;
-    * a watchdog timer also shuts the socket down at the deadline, which covers a server that
-      drips the response headers.
+def _arm(sock: Any, deadline: float) -> bool:
+    """Allow the next socket operation at most the read timeout, and never more than the time
+    left in the total deadline. Returns True when the total deadline is the binding limit, so a
+    timeout of this operation is the deadline expiring rather than a stalled peer."""
+    remaining = _remaining(deadline)
+    sock.settimeout(min(JWKS_READ_TIMEOUT_SECONDS, remaining))
+    return remaining <= JWKS_READ_TIMEOUT_SECONDS
 
-    The connection is made directly: proxy environment variables are not used, and a redirect
-    is an error (the status must be 200).
+
+def _failure(category: FailureCategory, deadline: float) -> KeyUnavailable:
+    """The error for something unexpected. A deadline that has passed always takes precedence."""
+    if time.monotonic() >= deadline:
+        category = FailureCategory.DEADLINE
+    return KeyUnavailable(category)
+
+
+class _Lookup:
+    __slots__ = ("addresses", "done", "failed", "key")
+
+    def __init__(self, key: tuple[str, int]) -> None:
+        self.key = key
+        self.done = threading.Event()
+        self.addresses: list[Any] = []
+        self.failed = False
+
+
+def _system_resolve(host: str, port: int) -> list[Any]:
+    return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+class SingleFlightResolver:
+    """Name resolution with a bounded caller wait and at most one lookup in flight.
+
+    The operating system's resolver call cannot be cancelled. So the lookup runs in a helper
+    (daemon) thread and the caller waits only until its deadline. A lookup that outlives its
+    caller keeps running until the resolver gives up and its result is discarded, but it is
+    never joined by a second thread: while it is outstanding, new callers wait for that same
+    lookup, up to their own deadline, instead of starting another. So repeated timeouts cannot
+    pile up resolver threads, and the number of outstanding lookups stays at most one for the
+    lifetime of this object (one per provider).
     """
-    deadline = time.monotonic() + timeout
-    parts = urlsplit(url)
-    connection_class = {"https": http.client.HTTPSConnection, "http": http.client.HTTPConnection}
+
+    def __init__(self, resolve: Callable[[str, int], list[Any]] = _system_resolve) -> None:
+        self._resolve = resolve
+        self._lock = threading.Lock()
+        self._current: _Lookup | None = None
+
+    def lookup(self, host: str, port: int, deadline: float) -> list[Any]:
+        key = (host, port)
+        while True:
+            with self._lock:
+                current = self._current
+                if current is None or current.done.is_set():
+                    started = _Lookup(key)
+                    try:
+                        threading.Thread(
+                            target=self._run,
+                            args=(started, host, port),
+                            daemon=True,
+                            name="jwks-dns",
+                        ).start()
+                    except Exception:  # noqa: BLE001 - e.g. no thread could be created
+                        # Nothing was published, so no state can be left waiting for a thread
+                        # that does not exist: the next caller simply tries again.
+                        raise KeyUnavailable(FailureCategory.DNS) from None
+                    current = self._current = started
+                    break
+                if current.key == key:
+                    break  # join the lookup that is already outstanding
+            # A lookup for something else is outstanding: wait for it, within our deadline.
+            if not current.done.wait(_remaining(deadline)):
+                raise KeyUnavailable(FailureCategory.DEADLINE)
+        if not current.done.wait(_remaining(deadline)):
+            raise KeyUnavailable(FailureCategory.DEADLINE)
+        if current.failed or not current.addresses:
+            raise KeyUnavailable(FailureCategory.DNS)
+        return current.addresses
+
+    def _run(self, lookup: _Lookup, host: str, port: int) -> None:
+        try:
+            lookup.addresses = list(self._resolve(host, port))
+        except BaseException:  # noqa: BLE001 - the reason is deliberately discarded
+            lookup.failed = True
+        finally:
+            lookup.done.set()
+
+
+def _addresses(resolver: SingleFlightResolver, host: str, port: int, deadline: float) -> list[Any]:
     try:
-        host = parts.hostname
-        port = parts.port
+        ipaddress.ip_address(host)
+        literal = True
     except ValueError:
-        raise KeyUnavailable from None
-    if parts.scheme not in connection_class or not host:
-        raise KeyUnavailable
-    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-
-    connection = connection_class[parts.scheme](host, port, timeout=timeout)
-    expired = threading.Event()
-    watchdog: threading.Timer | None = None
-    chunks: list[bytes] = []
+        literal = False
+    if not literal:
+        # Outside the `except` block, so that no exception that mentions the host name is
+        # attached to the failure as its context.
+        return resolver.lookup(host, port, deadline)
+    # A literal address needs no lookup, and the numeric-only flag means this never blocks.
     try:
-        connection.connect()
-        sock = connection.sock
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise KeyUnavailable
-        watchdog = threading.Timer(remaining, _abort_connection, args=(sock, expired))
-        watchdog.daemon = True
-        watchdog.start()
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST)
+    except OSError:
+        raise KeyUnavailable(FailureCategory.DNS) from None
+    if not found:
+        raise KeyUnavailable(FailureCategory.DNS)
+    return list(found)
 
-        connection.request("GET", target, headers={"Accept": "application/json"})
-        response = connection.getresponse()
-        if response.status != 200:
-            raise KeyUnavailable
-        declared = response.getheader("Content-Length")
-        total = 0
-        # The response closes itself once the declared length has been read, and the socket
-        # may not be used after that.
-        while not response.isclosed():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or expired.is_set():
-                raise KeyUnavailable
-            sock.settimeout(remaining)
-            chunk = response.read1(min(JWKS_CHUNK_BYTES, max_bytes + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise KeyUnavailable
-            chunks.append(chunk)
-        if declared is not None and (not declared.isdigit() or total != int(declared)):
-            raise KeyUnavailable  # a short or inconsistent body is never trusted
-        if expired.is_set():
-            # The watchdog cut the connection: what was read is incomplete, whatever it looks like.
-            raise KeyUnavailable
-    except (OSError, http.client.HTTPException, ValueError):
-        raise KeyUnavailable from None
-    finally:
-        if watchdog is not None:
+
+def _connect(addresses: list[Any], deadline: float) -> socket.socket:
+    """Try each address in order. Any failure on one address, including failing to create the
+    socket at all (for example an address family this host does not support), moves on to the
+    next one."""
+    for family, socktype, proto, _canonical_name, sockaddr in addresses:
+        remaining = _remaining(deadline)
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(min(JWKS_CONNECT_TIMEOUT_SECONDS, remaining))
+            sock.connect(sockaddr)
+            return sock
+        except Exception as exc:  # noqa: BLE001 - the reason is deliberately discarded
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            if isinstance(exc, TimeoutError) and remaining <= JWKS_CONNECT_TIMEOUT_SECONDS:
+                raise KeyUnavailable(FailureCategory.DEADLINE) from None
+    if time.monotonic() >= deadline:
+        raise KeyUnavailable(FailureCategory.DEADLINE)
+    raise KeyUnavailable(FailureCategory.CONNECT)
+
+
+class JwksFetcher:
+    """GET the key set within one total deadline, never following a redirect.
+
+    `timeout` is a single monotonic deadline for the whole exchange: name resolution, connect,
+    TLS, response headers and body. A server (or resolver) that is slow, or that sends a byte
+    at a time, cannot hold the caller or the provider lock beyond it:
+
+    * name resolution is single-flight and waited for only until the deadline;
+    * each connect attempt and each read is limited to 3 seconds and to the time left;
+    * the body is read in small chunks, and a watchdog timer shuts the socket down at the
+      deadline, which also covers a dripped TLS handshake or dripped response headers.
+
+    Every failure is a `KeyUnavailable` with one fixed `FailureCategory`, including anything
+    unexpected. The category is `deadline` whenever the total deadline has expired (or the
+    operation that timed out was limited by it). A single connect or read that stalls for its
+    own 3 second limit while time remains is reported under its phase (`connect`, `tls` or
+    `body`). The connection is made directly: proxy environment variables are not used,
+    certificates are verified against the original host name, and a redirect is an error (the
+    status must be 200).
+    """
+
+    def __init__(self, resolver: SingleFlightResolver | None = None) -> None:
+        self._resolver = resolver or SingleFlightResolver()
+
+    def __call__(self, url: str, timeout: float, max_bytes: int) -> bytes:
+        deadline = time.monotonic() + timeout
+        try:
+            return self._fetch(url, deadline, max_bytes)
+        except KeyUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 - nothing may escape except a categorised failure
+            raise _failure(FailureCategory.BODY, deadline) from None
+
+    def _fetch(self, url: str, deadline: float, max_bytes: int) -> bytes:
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname
+            port = parts.port
+        except ValueError:
+            raise KeyUnavailable(FailureCategory.CONNECT) from None
+        if parts.scheme not in ("https", "http") or not host:
+            raise KeyUnavailable(FailureCategory.CONNECT)
+        secure = parts.scheme == "https"
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+        try:
+            addresses = _addresses(self._resolver, host, port or (443 if secure else 80), deadline)
+        except KeyUnavailable:
+            raise
+        except Exception:  # noqa: BLE001
+            raise _failure(FailureCategory.DNS, deadline) from None
+        try:
+            sock = _connect(addresses, deadline)
+        except KeyUnavailable:
+            raise
+        except Exception:  # noqa: BLE001
+            raise _failure(FailureCategory.CONNECT, deadline) from None
+        holder: list[socket.socket | None] = [sock]
+        expired = threading.Event()
+        watchdog = threading.Timer(
+            max(deadline - time.monotonic(), 0.001), _abort_connection, args=(holder, expired)
+        )
+        watchdog.daemon = True
+        category = FailureCategory.BODY
+        bound = False  # whether the total deadline limited the operation now in progress
+        connection: http.client.HTTPConnection | None = None
+        chunks: list[bytes] = []
+        try:
+            # Without the watchdog the deadline could not be enforced while reading, so if it
+            # cannot be started the fetch fails (the `finally` below closes the socket).
+            watchdog.start()
+            if secure:
+                category = FailureCategory.TLS
+                context = ssl.create_default_context()
+                # wrap_socket takes over the file descriptor, so from here on the watchdog
+                # must act on the TLS socket.
+                sock = context.wrap_socket(
+                    sock, server_hostname=host, do_handshake_on_connect=False
+                )
+                holder[0] = sock
+                bound = _arm(sock, deadline)
+                sock.do_handshake()
+                category = FailureCategory.BODY
+            # `sock` is already connected, so http.client only speaks HTTP over it.
+            connection = (http.client.HTTPSConnection if secure else http.client.HTTPConnection)(
+                host, port
+            )
+            connection.sock = sock
+            bound = _arm(sock, deadline)
+            connection.request("GET", target, headers={"Accept": "application/json"})
+            bound = _arm(sock, deadline)
+            response = connection.getresponse()
+            if response.status != 200:
+                raise KeyUnavailable(FailureCategory.STATUS)
+            declared = response.getheader("Content-Length")
+            total = 0
+            # The response closes itself once the declared length has been read, and the
+            # socket may not be used after that.
+            while not response.isclosed():
+                bound = _arm(sock, deadline)
+                if expired.is_set():
+                    raise KeyUnavailable(FailureCategory.DEADLINE)
+                chunk = response.read1(min(JWKS_CHUNK_BYTES, max_bytes + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise KeyUnavailable(FailureCategory.SIZE)
+                chunks.append(chunk)
+            if expired.is_set():
+                # The watchdog cut the connection: what was read is incomplete, whatever it
+                # looks like.
+                raise KeyUnavailable(FailureCategory.DEADLINE)
+            if declared is not None and (not declared.isdigit() or total != int(declared)):
+                raise KeyUnavailable(FailureCategory.BODY)  # a short or inconsistent body
+        except KeyUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified below, the text is never kept
+            # The deadline wins if it has expired, or if the operation that timed out was
+            # limited by it. Otherwise the phase decides: a stall of one 3 second operation
+            # while time remains is `tls` (during the handshake) or `body`.
+            if (
+                expired.is_set()
+                or time.monotonic() >= deadline
+                or (bound and isinstance(exc, TimeoutError))
+            ):
+                raise KeyUnavailable(FailureCategory.DEADLINE) from None
+            raise KeyUnavailable(category) from None
+        finally:
             watchdog.cancel()
-        connection.close()
-    return b"".join(chunks)
+            if connection is not None:
+                connection.close()
+            for open_socket in {sock, holder[0]}:
+                if open_socket is not None:
+                    try:
+                        open_socket.close()
+                    except OSError:
+                        pass
+        return b"".join(chunks)
+
+
+def fetch_jwks_bytes(url: str, timeout: float, max_bytes: int) -> bytes:
+    """One-off fetch with its own resolver. The key provider keeps one `JwksFetcher` for its
+    whole lifetime instead, so that DNS stays single-flight across fetches."""
+    return JwksFetcher()(url, timeout, max_bytes)
 
 
 class JwksKeyProvider:
@@ -210,12 +452,12 @@ class JwksKeyProvider:
         self,
         jwks_url: str,
         *,
-        timeout: float = JWKS_TIMEOUT_SECONDS,
+        timeout: float = JWKS_TIMEOUT_DEFAULT_SECONDS,
         ttl: float = JWKS_TTL_SECONDS,
         cooldown: float = JWKS_REFRESH_COOLDOWN_SECONDS,
         failure_backoff: float = JWKS_FAILURE_BACKOFF_SECONDS,
         max_bytes: int = JWKS_MAX_BYTES,
-        fetch: Callable[[str, float, int], bytes] = fetch_jwks_bytes,
+        fetch: Callable[[str, float, int], bytes] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._url = jwks_url
@@ -224,12 +466,14 @@ class JwksKeyProvider:
         self._cooldown = cooldown
         self._failure_backoff = failure_backoff
         self._max_bytes = max_bytes
-        self._fetch = fetch
+        # One fetcher for the provider's lifetime, so DNS lookups stay single-flight.
+        self._fetch = fetch or JwksFetcher()
         self._clock = clock
         self._lock = threading.Lock()
         self._keys: dict[str, Any] | None = None
         self._fetched_at = 0.0
         self._failed_at: float | None = None
+        self._failed_category = FailureCategory.BODY
 
     def get_key(self, kid: str) -> Any:
         with self._lock:
@@ -255,16 +499,22 @@ class JwksKeyProvider:
 
     def _refresh(self, now: float) -> None:
         if self._failed_at is not None and now - self._failed_at < self._failure_backoff:
-            raise KeyUnavailable
+            raise KeyUnavailable(self._failed_category)
         try:
             keys = self._parse(self._fetch(self._url, self._timeout, self._max_bytes))
-        except KeyUnavailable:
+        except Exception as exc:  # noqa: BLE001 - nothing unexpected may bypass the backoff
             # The cache is left as it is. If it has expired, the next call tries to refresh
-            # again and fails again, so stale keys are never served.
-            self._failed_at = now
-            raise
+            # again and fails again, so stale keys are never served. Times are taken after the
+            # attempt: a fetch may legitimately last several seconds. Anything that is not
+            # already a categorised failure is reported as `body`, without its text.
+            category = exc.category if isinstance(exc, KeyUnavailable) else FailureCategory.BODY
+            self._failed_at = self._clock()
+            self._failed_category = category
+            if isinstance(exc, KeyUnavailable):
+                raise
+            raise KeyUnavailable(category) from None
         self._keys = keys
-        self._fetched_at = now
+        self._fetched_at = self._clock()
         self._failed_at = None
 
     @staticmethod

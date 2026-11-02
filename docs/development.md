@@ -42,6 +42,7 @@ The defaults in `.env.example` work with the local database described in [sectio
 | `LOG_FORMAT` | `json` | `json` or `text`. `text` is easier to read while developing, with the same privacy protections. See [logging-and-errors.md](logging-and-errors.md). |
 | `SUPABASE_URL` | none | Your Supabase project URL (`https://<project-ref>.supabase.co`). Not a secret. Required in production. In development and test, without it protected endpoints answer 503. See [authentication.md](authentication.md). |
 | `SUPABASE_JWT_AUDIENCE` | `authenticated` | The token audience the backend requires. |
+| `SUPABASE_JWKS_TIMEOUT_SECONDS` | `10` | Total time allowed for fetching the signing keys (DNS, connect, TLS, headers and body), 1 to 30 seconds. Empty means 10. Raise it if `check_token` reports a `deadline` failure on a slow network. See [authentication.md](authentication.md). |
 | `TEST_DATABASE_URL` | none | Connection URL of the dedicated test database. Its name must end in `_test`. Only the automated tests use it. |
 
 Settings are read from real environment variables first and then from the `.env` file in the repository root. Restart the backend after changing them.

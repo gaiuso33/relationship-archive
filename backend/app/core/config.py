@@ -6,6 +6,7 @@ read from an optional `.env` file at the repository root (never committed; see
 application logic.
 """
 
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 DATABASE_DRIVER = "postgresql+psycopg"
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# Total wall-clock deadline for one fetch of the Supabase signing keys (ADR-004). It can be
+# changed within these bounds but never disabled.
+JWKS_TIMEOUT_MIN_SECONDS = 1.0
+JWKS_TIMEOUT_MAX_SECONDS = 30.0
+JWKS_TIMEOUT_DEFAULT_SECONDS = 10.0
 
 
 class Settings(BaseSettings):
@@ -50,6 +57,7 @@ class Settings(BaseSettings):
     # signing keys. Never add a service-role key or the legacy JWT secret here.
     supabase_url: str | None = None
     supabase_jwt_audience: str = "authenticated"
+    supabase_jwks_timeout_seconds: float = JWKS_TIMEOUT_DEFAULT_SECONDS
 
     @field_validator("log_level", "log_format", mode="before")
     @classmethod
@@ -95,6 +103,31 @@ class Settings(BaseSettings):
             raise ValueError("the Supabase URL must be the project origin, without a path")
         shown_host = f"[{host}]" if ":" in host else host
         return f"{parts.scheme}://{shown_host}" + (f":{port}" if port else "")
+
+    @field_validator("supabase_jwks_timeout_seconds", mode="before")
+    @classmethod
+    def bound_jwks_timeout(cls, value: object) -> float:
+        if value is None:
+            return JWKS_TIMEOUT_DEFAULT_SECONDS
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return JWKS_TIMEOUT_DEFAULT_SECONDS  # An empty variable means "use the default".
+            try:
+                value = float(value)
+            except ValueError:
+                raise ValueError("the JWKS timeout must be a number of seconds") from None
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("the JWKS timeout must be a number of seconds")
+        seconds = float(value)
+        if not math.isfinite(seconds) or not (
+            JWKS_TIMEOUT_MIN_SECONDS <= seconds <= JWKS_TIMEOUT_MAX_SECONDS
+        ):
+            raise ValueError(
+                f"the JWKS timeout must be between {JWKS_TIMEOUT_MIN_SECONDS:g} and "
+                f"{JWKS_TIMEOUT_MAX_SECONDS:g} seconds"
+            )
+        return seconds
 
     @field_validator("supabase_jwt_audience")
     @classmethod
