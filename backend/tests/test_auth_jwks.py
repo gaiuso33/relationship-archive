@@ -234,6 +234,7 @@ SLOW_OK_DELAY = 1.5  # a valid response that starts later than DEADLINE
 class Server:
     def __init__(self) -> None:
         self.mode = "ok"
+        self.delay = SLOW_OK_DELAY  # used by the slow_ok and split_ok modes
         self.body = jwks((a.KID, a.EC_KEY))
         self.hits: list[str] = []
         outer = self
@@ -291,11 +292,23 @@ class Server:
                     self.drip(b" " * DRIP_BYTES)
                 elif outer.mode == "slow_ok":
                     # A complete, valid answer that simply takes a while to start.
-                    time.sleep(SLOW_OK_DELAY)
+                    time.sleep(outer.delay)
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(outer.body)))
                     self.end_headers()
                     self.wfile.write(outer.body)
+                elif outer.mode == "split_ok":
+                    # A complete, valid answer that pauses twice: before the headers and in
+                    # the middle of the body. No single wait is long, the whole is.
+                    half = len(outer.body) // 2
+                    time.sleep(outer.delay)
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(outer.body)))
+                    self.end_headers()
+                    self.wfile.write(outer.body[:half])
+                    self.wfile.flush()
+                    time.sleep(outer.delay)
+                    self.wfile.write(outer.body[half:])
                 elif outer.mode == "slow":
                     time.sleep(1.5)
                     self.send_response(200)

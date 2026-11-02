@@ -116,7 +116,8 @@ KEY_FAILURE_MESSAGES: dict[FailureCategory, str] = {
     ),
     FailureCategory.SIZE: "Could not fetch the signing keys: the response was too large.",
     FailureCategory.BODY: (
-        "Could not fetch the signing keys: the response was incomplete or unusable."
+        "Could not fetch the signing keys: the response was incomplete, stalled or unusable "
+        "(or an unexpected error occurred)."
     ),
 }
 
@@ -139,6 +140,9 @@ def run(
         )
     except KeyUnavailable as exc:
         out(KEY_FAILURE_MESSAGES[exc.category])
+        return 2
+    except Exception:  # noqa: BLE001 - never show raw error text; this is a fixed sentence
+        out(KEY_FAILURE_MESSAGES[FailureCategory.BODY])
         return 2
     for line in describe_keys(body):
         out(line)

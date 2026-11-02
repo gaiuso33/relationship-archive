@@ -108,6 +108,15 @@ def category_of(call: Callable[[], Any]) -> FailureCategory:
     return caught.value.category
 
 
+@pytest.fixture(autouse=True)
+def no_resolver_threads_left() -> Iterator[None]:
+    """Let abandoned lookups from one test finish before the next test counts threads."""
+    yield
+    wait_until(
+        lambda: not [t for t in threading.enumerate() if t.name == "jwks-dns" and t.is_alive()], 5
+    )
+
+
 # --- the setting -------------------------------------------------------------------------
 
 
@@ -171,7 +180,7 @@ def test_invalid_values_are_rejected_without_echoing_them(
     assert "input_value" not in str(caught.value)
 
 
-@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, 31, None.__class__])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, 31, "abc"])
 def test_invalid_python_values_cannot_disable_the_deadline(value: object) -> None:
     with pytest.raises(ValidationError):
         make(supabase_jwks_timeout_seconds=value)
@@ -663,7 +672,7 @@ def test_each_failure_category_is_produced_and_leaks_nothing(
     assert str(error) == ""
     assert error.args == ()
     assert error.__cause__ is None
-    assert error.__suppress_context__ or error.__context__ is None or case == "dns"
+    assert error.__suppress_context__ or error.__context__ is None
     rendered = repr(error) + str(error.category)
     for sensitive in ("127.0.0.1", NAME, "internal-secret", str(server.httpd.server_port), "jwks"):
         assert sensitive not in rendered
@@ -849,3 +858,605 @@ def test_the_diagnostic_tool_prints_one_fixed_message_per_category(
     assert len({check_token.KEY_FAILURE_MESSAGES[c] for c in FailureCategory}) == len(
         list(FailureCategory)
     )
+
+
+# === review follow-up: unexpected failures, address fallback, resolver recovery, stalls ==========
+
+
+class SocketShim:
+    """The `socket` module as the fetcher sees it, with the socket class replaced.
+
+    Only `app.core.auth` is given the shim, so the loopback test servers are unaffected.
+    """
+
+    def __init__(self, factory: Callable[..., Any]) -> None:
+        self.socket = factory
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(socket, name)
+
+
+def failing_for(families: set[int], error: Exception) -> Callable[..., socket.socket]:
+    real = socket.socket
+
+    def factory(family: int = -1, *args: Any, **kw: Any) -> socket.socket:
+        if family in families:
+            raise error
+        return real(family, *args, **kw)
+
+    return factory
+
+
+@contextmanager
+def silent_listener() -> Iterator[int]:
+    """Accepts TCP connections and never says anything (a peer that stalls)."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    held: list[socket.socket] = []
+
+    def accept() -> None:
+        while True:
+            try:
+                held.append(listener.accept()[0])
+            except OSError:
+                return
+
+    threading.Thread(target=accept, daemon=True).start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
+        for connection in held:
+            connection.close()
+
+
+# --- finding 2: a failed thread start must not leave the resolver stuck ---------------------------
+
+
+def test_a_failed_thread_start_is_a_dns_failure_and_the_resolver_recovers(monkeypatch) -> None:
+    resolver = FakeResolver(lambda: loopback(1))
+    single = SingleFlightResolver(resolver)
+    real_start = threading.Thread.start
+    failed: list[int] = []
+
+    def start(self: threading.Thread) -> None:
+        if self.name == "jwks-dns" and not failed:
+            failed.append(1)
+            raise RuntimeError("can't start new thread: secret-detail")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    with pytest.raises(KeyUnavailable) as caught:
+        single.lookup(NAME, 443, time.monotonic() + 2)
+
+    assert caught.value.category is FailureCategory.DNS
+    assert str(caught.value) == ""
+    assert caught.value.__cause__ is None
+    assert "secret" not in repr(caught.value)
+    assert single._current is None  # noqa: SLF001 - nothing was published for a dead thread
+    assert resolver.calls == 0
+
+    assert single.lookup(NAME, 443, time.monotonic() + 2) == loopback(1)  # threads work again
+    assert resolver.calls == 1
+
+
+def test_a_thread_start_failure_after_an_abandoned_lookup_does_not_wedge_the_resolver(
+    monkeypatch,
+) -> None:
+    resolver = FakeResolver(lambda: loopback(1))
+    resolver.block = True
+    single = SingleFlightResolver(resolver)
+    assert category_of(lambda: single.lookup(NAME, 443, time.monotonic() + 0.05)) is (
+        FailureCategory.DEADLINE
+    )
+    resolver.release.set()
+    assert wait_until(lambda: resolver.active == 0)
+    resolver.block = False
+    real_start = threading.Thread.start
+    failed: list[int] = []
+
+    def start(self: threading.Thread) -> None:
+        if self.name == "jwks-dns" and not failed:
+            failed.append(1)
+            raise RuntimeError("no threads")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    assert category_of(lambda: single.lookup(NAME, 443, time.monotonic() + 2)) is (
+        FailureCategory.DNS
+    )
+    assert single.lookup(NAME, 443, time.monotonic() + 2) == loopback(1)
+
+
+def test_a_fetch_recovers_after_a_failed_thread_start(server: Server, monkeypatch) -> None:  # noqa: F811
+    resolver = FakeResolver(lambda: loopback(server.httpd.server_port))
+    fetcher = JwksFetcher(SingleFlightResolver(resolver))
+    real_start = threading.Thread.start
+    failed: list[int] = []
+
+    def start(self: threading.Thread) -> None:
+        if self.name == "jwks-dns" and not failed:
+            failed.append(1)
+            raise RuntimeError("no threads")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    assert category_of(lambda: fetcher(named(server.url), 3.0, MAX)) is FailureCategory.DNS
+    assert fetcher(named(server.url), 3.0, MAX) == server.body
+
+
+# --- the resolver state machine under contention ---------------------------------------
+
+
+def test_many_threads_never_run_two_lookups_at_once() -> None:
+    resolver = FakeResolver(lambda: (time.sleep(0.005), loopback(1))[1])
+    single = SingleFlightResolver(resolver)
+    results: list[list[Any]] = []
+    failures: list[FailureCategory] = []
+
+    def work(index: int) -> None:
+        host = f"h{index % 2}.test"  # two names, so callers also meet a lookup for the other one
+        for _ in range(20):
+            try:
+                results.append(single.lookup(host, 443, time.monotonic() + 10))
+            except KeyUnavailable as error:
+                failures.append(error.category)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert failures == []
+    assert len(results) == 12 * 20
+    assert all(result == loopback(1) for result in results)
+    assert resolver.max_active == 1
+    assert resolver.active == 0
+
+
+def test_callers_that_time_out_never_wedge_or_multiply_the_lookup() -> None:
+    """Many callers whose deadline is shorter than the lookup, repeatedly, and then recovery."""
+    resolver = FakeResolver(lambda: (time.sleep(0.05), loopback(1))[1])
+    single = SingleFlightResolver(resolver)
+    outcomes: list[str] = []
+
+    def work(index: int) -> None:
+        host = f"h{index % 2}.test"
+        for _ in range(30):
+            try:
+                single.lookup(host, 443, time.monotonic() + 0.01)
+                outcomes.append("ok")
+            except KeyUnavailable as error:
+                outcomes.append(error.category.value)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert set(outcomes) <= {"ok", "deadline"}
+    assert "deadline" in outcomes
+    assert resolver.max_active == 1
+    # Whatever happened above, the next caller with time to spare gets an answer.
+    assert single.lookup("h0.test", 443, time.monotonic() + 5) == loopback(1)
+    assert wait_until(lambda: resolver.active == 0)
+    assert resolver.max_active == 1
+
+
+# --- finding 1: fallback to the next address ----------------------------------------------------
+
+
+def test_a_socket_that_cannot_be_created_moves_on_to_the_next_address(
+    server: Server,  # noqa: F811
+    monkeypatch,
+) -> None:
+    port = server.httpd.server_port
+    ipv6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))
+    resolver = FakeResolver(lambda: [ipv6, *loopback(port)])
+    unsupported = OSError(97, "Address family not supported by protocol")
+    monkeypatch.setattr(
+        auth_module, "socket", SocketShim(failing_for({socket.AF_INET6}, unsupported))
+    )
+
+    body = JwksFetcher(SingleFlightResolver(resolver))(named(server.url), 3.0, MAX)
+
+    assert body == server.body
+
+
+def test_any_error_creating_a_socket_moves_on_and_never_escapes(
+    server: Server,  # noqa: F811
+    monkeypatch,
+) -> None:
+    port = server.httpd.server_port
+    ipv6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))
+    resolver = FakeResolver(lambda: [ipv6, *loopback(port)])
+    monkeypatch.setattr(
+        auth_module, "socket", SocketShim(failing_for({socket.AF_INET6}, ValueError("secret")))
+    )
+
+    assert JwksFetcher(SingleFlightResolver(resolver))(named(server.url), 3.0, MAX) == server.body
+
+
+def test_when_no_socket_can_be_created_the_failure_is_connect(monkeypatch) -> None:
+    resolver = FakeResolver(lambda: loopback(9))
+    monkeypatch.setattr(
+        auth_module,
+        "socket",
+        SocketShim(failing_for({socket.AF_INET}, OSError(24, "Too many open files: secret"))),
+    )
+
+    with pytest.raises(KeyUnavailable) as caught:
+        JwksFetcher(SingleFlightResolver(resolver))(f"http://{NAME}:9/jwks", 3.0, MAX)
+
+    assert caught.value.category is FailureCategory.CONNECT
+    assert str(caught.value) == ""
+    assert "secret" not in repr(caught.value)
+
+
+def test_a_malformed_resolver_answer_is_a_connect_failure_not_a_crash() -> None:
+    resolver = FakeResolver(lambda: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", "not-an-address")])
+
+    assert category_of(
+        lambda: JwksFetcher(SingleFlightResolver(resolver))(f"http://{NAME}:9/jwks", 3.0, MAX)
+    ) is (FailureCategory.CONNECT)
+
+
+# --- finding 1: unexpected exceptions -----------------------------------------------------
+
+
+class Raising:
+    """A fetch that raises the same prepared exception every time, and counts calls."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def __call__(self, url: str, timeout: float, max_bytes: int) -> bytes:
+        self.calls += 1
+        raise self.error
+
+
+UNEXPECTED = [
+    OSError("secret-host.internal: connection refused"),
+    RuntimeError("secret"),
+    AttributeError("'NoneType' object has no attribute 'secret'"),
+    ValueError("secret"),
+    UnicodeError("secret"),
+]
+
+
+@pytest.mark.parametrize("error", UNEXPECTED, ids=lambda e: type(e).__name__)
+def test_an_unexpected_fetch_exception_is_categorised_and_triggers_the_backoff(
+    error: Exception,
+) -> None:
+    clock = Clock()
+    fetch = Raising(error)
+    keys = JwksKeyProvider(
+        "https://example.invalid/jwks", failure_backoff=5, fetch=fetch, clock=clock
+    )
+
+    with pytest.raises(KeyUnavailable) as first:
+        keys.get_key(a.KID)
+
+    assert first.value.category is FailureCategory.BODY
+    assert str(first.value) == ""
+    assert first.value.__cause__ is None
+    assert "secret" not in repr(first.value) + str(first.value.category)
+    assert fetch.calls == 1
+
+    clock.now += 4  # inside the backoff: no new fetch, same fixed category
+    assert category_of(lambda: keys.get_key(a.KID)) is FailureCategory.BODY
+    assert fetch.calls == 1
+
+    clock.now += 2  # backoff over: one more attempt
+    assert category_of(lambda: keys.get_key(a.KID)) is FailureCategory.BODY
+    assert fetch.calls == 2
+
+
+def test_an_unexpected_exception_on_an_expired_cache_never_serves_stale_keys() -> None:
+    clock = Clock()
+    good = jwks((a.KID, a.EC_KEY))
+
+    class Flaky:
+        calls = 0
+
+        def __call__(self, url: str, timeout: float, max_bytes: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return good
+            raise RuntimeError("secret")
+
+    keys = JwksKeyProvider("https://example.invalid/jwks", ttl=300, fetch=Flaky(), clock=clock)
+    assert keys.get_key(a.KID) is not None
+
+    clock.now += 301
+
+    assert category_of(lambda: keys.get_key(a.KID)) is FailureCategory.BODY
+
+
+def test_an_unexpected_exception_in_the_real_fetch_is_categorised(monkeypatch) -> None:
+    with silent_listener() as port:
+        url = f"http://127.0.0.1:{port}/jwks"
+
+        def boom(*args: Any, **kw: Any) -> None:
+            raise RuntimeError("secret-internal-detail")
+
+        # The watchdog thread cannot be started: without it the deadline could not be enforced.
+        monkeypatch.setattr(threading.Timer, "start", boom)
+
+        with pytest.raises(KeyUnavailable) as caught:
+            JwksFetcher()(url, 3.0, MAX)
+
+    assert caught.value.category is FailureCategory.BODY
+    assert str(caught.value) == ""
+    assert "secret" not in repr(caught.value)
+
+
+def test_a_failure_while_building_the_tls_context_is_a_tls_failure(monkeypatch) -> None:
+    def boom(*args: Any, **kw: Any) -> None:
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(auth_module.ssl, "create_default_context", boom)
+    with silent_listener() as port:
+        with pytest.raises(KeyUnavailable) as caught:
+            JwksFetcher()(f"https://127.0.0.1:{port}/jwks", 3.0, MAX)
+
+    assert caught.value.category is FailureCategory.TLS
+    assert "secret" not in repr(caught.value)
+
+
+def test_the_watchdog_race_in_the_tls_handshake_cannot_escape_as_an_attribute_error(
+    monkeypatch,
+) -> None:
+    """At the deadline the watchdog clears the TLS object (ssl.SSLSocket.shutdown), so a
+    handshake that has not started yet can see `None` and raise AttributeError."""
+
+    def raced(self: ssl.SSLSocket, *args: Any, **kw: Any) -> None:
+        raise AttributeError("'NoneType' object has no attribute 'do_handshake'")
+
+    monkeypatch.setattr(ssl.SSLSocket, "do_handshake", raced)
+    with silent_listener() as port:
+        category = category_of(lambda: JwksFetcher()(f"https://127.0.0.1:{port}/jwks", 3.0, MAX))
+
+    assert category is FailureCategory.TLS
+
+
+def test_the_api_answers_a_generic_503_for_an_unexpected_fetch_exception(log_format: str) -> None:
+    settings = a.auth_settings(log_level="DEBUG", log_format=log_format)
+    stream = io.StringIO()
+    keys = JwksKeyProvider(
+        "https://secret-project.example.invalid/jwks",
+        fetch=Raising(OSError("secret-host.internal refused")),
+        clock=Clock(),
+    )
+    application = create_app(settings, keys)
+    configure_logging(settings, stream)
+    client = TestClient(application, raise_server_exceptions=False)
+    token = a.make_token()
+
+    response = client.get(f"{API_V1_PREFIX}/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "service_unavailable"
+    output = stream.getvalue()
+    assert "auth_keys_unavailable_body" in output
+    for secret in (token, "secret-host", "secret-project", "refused"):
+        assert secret not in output
+        assert secret not in response.text
+
+
+def test_the_diagnostic_tool_prints_a_fixed_message_for_an_unexpected_failure() -> None:
+    lines: list[str] = []
+    settings = make(supabase_url="https://secret-project.example.invalid")
+
+    def failing(url: str, timeout: float, max_bytes: int) -> bytes:
+        raise RuntimeError("secret-host.internal exploded")
+
+    code = check_token.run(settings, fetch=failing, out=lines.append)
+
+    assert code == 2
+    assert lines[-1] == check_token.KEY_FAILURE_MESSAGES[FailureCategory.BODY]
+    joined = "\n".join(lines)
+    assert "secret-host" not in joined
+    assert "exploded" not in joined
+
+
+# --- finding 3: a stalled operation versus the total deadline -------------------------------------
+
+
+def test_a_stall_longer_than_three_seconds_inside_a_larger_deadline_is_body_not_deadline(
+    server: Server,  # noqa: F811
+) -> None:
+    assert auth_module.JWKS_READ_TIMEOUT_SECONDS == 3.0
+    server.mode = "slow_ok"
+    server.delay = 3.6  # no byte for longer than the 3 s read limit; the 10 s deadline is far off
+    started = time.monotonic()
+
+    category = category_of(lambda: JwksFetcher()(server.url, 10.0, MAX))
+
+    elapsed = time.monotonic() - started
+    assert category is FailureCategory.BODY
+    assert 2.5 <= elapsed < 3.0 + TOLERANCE, f"took {elapsed:.2f}s"  # the read limit, not 10 s
+
+
+def test_a_read_stall_is_reported_under_its_phase_when_time_remains(
+    server: Server,  # noqa: F811
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(auth_module, "JWKS_READ_TIMEOUT_SECONDS", 0.4)
+    server.mode = "slow_ok"
+    server.delay = 1.5
+    started = time.monotonic()
+
+    assert category_of(lambda: JwksFetcher()(server.url, 5.0, MAX)) is FailureCategory.BODY
+
+    assert time.monotonic() - started < 0.4 + TOLERANCE
+
+
+def test_a_tls_handshake_stall_is_tls_when_time_remains(monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "JWKS_READ_TIMEOUT_SECONDS", 0.4)
+    with silent_listener() as port:
+        started = time.monotonic()
+
+        category = category_of(lambda: JwksFetcher()(f"https://127.0.0.1:{port}/jwks", 5.0, MAX))
+
+    assert category is FailureCategory.TLS
+    assert time.monotonic() - started < 0.4 + TOLERANCE
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_stall_that_hits_the_total_deadline_is_always_deadline(
+    scheme: str,
+    server: Server,  # noqa: F811
+) -> None:
+    """The read limit (3 s) is longer than the deadline, so the deadline is what expires. Run it
+    several times: the socket timeout and the watchdog fire at nearly the same moment, and the
+    answer must not depend on which one wins."""
+    server.mode = "slow_ok"
+    server.delay = 2.0
+    with silent_listener() as silent_port:
+        port = silent_port if scheme == "https" else server.httpd.server_port
+        for _ in range(5):
+            started = time.monotonic()
+
+            category = category_of(
+                lambda: JwksFetcher()(f"{scheme}://127.0.0.1:{port}/jwks", 0.4, MAX)
+            )
+
+            assert category is FailureCategory.DEADLINE
+            assert time.monotonic() - started < 0.4 + TOLERANCE
+
+
+def test_a_slow_response_whose_total_time_exceeds_the_read_limit_is_accepted(
+    server: Server,  # noqa: F811
+    monkeypatch,
+) -> None:
+    """Each wait is shorter than the read limit, the whole exchange is longer than it, and it is
+    still inside the total deadline: it must be accepted."""
+    monkeypatch.setattr(auth_module, "JWKS_READ_TIMEOUT_SECONDS", 1.0)
+    server.mode = "split_ok"
+    server.delay = 0.7  # two waits of 0.7 s: 1.4 s in total, over the 1.0 s read limit
+    started = time.monotonic()
+
+    body = JwksFetcher()(server.url, 5.0, MAX)
+
+    assert body == server.body
+    assert time.monotonic() - started >= 1.4
+
+
+def test_the_connect_limit_is_the_deadline_only_when_the_deadline_is_the_binding_limit(
+    monkeypatch,
+) -> None:
+    class TimingOut:
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def settimeout(self, value: float | None) -> None:
+            pass
+
+        def connect(self, address: Any) -> None:
+            raise TimeoutError("timed out")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(auth_module, "socket", SocketShim(TimingOut))
+
+    # 30 s left, 3 s limit: the attempt timed out on its own limit.
+    with pytest.raises(KeyUnavailable) as own:
+        auth_module._connect(loopback(9), time.monotonic() + 30)  # noqa: SLF001
+    assert own.value.category is FailureCategory.CONNECT
+
+    # 1 s left: the deadline was the limit, so it is the deadline that expired.
+    with pytest.raises(KeyUnavailable) as total:
+        auth_module._connect(loopback(9), time.monotonic() + 1)  # noqa: SLF001
+    assert total.value.category is FailureCategory.DEADLINE
+
+
+# --- the classification rules, without depending on timing ---------------------------------------
+
+
+class StalledSocket:
+    """A connected socket whose first read times out at once (as if the peer had stalled)."""
+
+    def __init__(self, *args: Any) -> None:
+        pass
+
+    def settimeout(self, value: float | None) -> None:
+        pass
+
+    def connect(self, address: Any) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        pass
+
+    def makefile(self, *args: Any, **kw: Any) -> Any:
+        class Stalled(io.RawIOBase):
+            def readable(self) -> bool:
+                return True
+
+            def readinto(self, buffer: Any) -> int:
+                raise TimeoutError("timed out")
+
+        return io.BufferedReader(Stalled())
+
+    def shutdown(self, how: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"),
+    [
+        (2.0, FailureCategory.DEADLINE),  # less than a read limit left: the deadline was binding
+        (30.0, FailureCategory.BODY),  # the read limit was binding: a stalled peer
+    ],
+)
+def test_a_read_timeout_is_the_deadline_only_when_the_deadline_was_the_binding_limit(
+    monkeypatch, budget: float, expected: FailureCategory
+) -> None:
+    """The socket timeout can fire a hair before the watchdog and the clock reach the deadline.
+    If the deadline set that timeout, the answer must still be `deadline`."""
+    monkeypatch.setattr(auth_module, "socket", SocketShim(StalledSocket))
+    resolver = FakeResolver(lambda: loopback(9))
+
+    category = category_of(
+        lambda: JwksFetcher(SingleFlightResolver(resolver))(f"http://{NAME}:9/jwks", budget, MAX)
+    )
+
+    assert category is expected
+
+
+def test_the_outer_guard_turns_anything_unexpected_into_a_categorised_failure(
+    monkeypatch,
+) -> None:
+    def explode(self: Any, url: str, deadline: float, max_bytes: int) -> bytes:
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(JwksFetcher, "_fetch", explode)
+
+    with pytest.raises(KeyUnavailable) as caught:
+        JwksFetcher()("https://example.invalid/jwks", 3.0, MAX)
+
+    assert caught.value.category is FailureCategory.BODY
+    assert str(caught.value) == ""
+    assert caught.value.__cause__ is None
+    assert "secret" not in repr(caught.value)
+    # A deadline that has already passed still takes precedence.
+    with pytest.raises(KeyUnavailable) as late:
+        JwksFetcher()("https://example.invalid/jwks", -1.0, MAX)
+    assert late.value.category is FailureCategory.DEADLINE
+
+
+@pytest.mark.parametrize("url", ["http://[::1/jwks", "ftp://example.invalid/jwks", "https:///jwks"])
+def test_a_malformed_url_is_a_connect_failure_not_a_crash(url: str) -> None:
+    assert category_of(lambda: JwksFetcher()(url, 3.0, MAX)) is FailureCategory.CONNECT

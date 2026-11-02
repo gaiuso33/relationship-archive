@@ -59,11 +59,15 @@ One fetch has a single **total** deadline (`SUPABASE_JWKS_TIMEOUT_SECONDS`, 10 s
 |---|---|
 | `dns` | The resolver returned an error or no addresses. |
 | `connect` | No address could be connected to within the per-attempt limit. |
-| `tls` | The TLS handshake, certificate or host-name check failed. |
+| `tls` | The TLS handshake, certificate or host-name check failed, or the handshake stalled for the 3 second read limit while time remained. |
 | `status` | The response was not HTTP 200 (including redirects). |
 | `deadline` | The total deadline expired, in any phase. |
 | `size` | The response was larger than 64 KiB. |
-| `body` | The body was incomplete, inconsistent with its declared length, or not a usable key set. |
+| `body` | The response was incomplete, stalled for the 3 second read limit while time remained, inconsistent with its declared length, or not a usable key set. Also the category for an unexpected internal error. |
+
+**Total deadline versus the 3 second limits.** `deadline` means the total deadline was the limit that ran out. If a connect or a read times out when less than 3 seconds of the total deadline were left, the deadline was the binding limit and the category is `deadline`. If a single connect or read stalls for its own 3 seconds while more time remains, the peer is stalling and the category is the phase it stalled in: `connect`, `tls` (during the handshake) or `body` (while waiting for the headers or the body). Raising `SUPABASE_JWKS_TIMEOUT_SECONDS` does not help with those: it only lengthens the total, and a server that sends nothing for 3 seconds still fails after 3 seconds. A response that is slow but never silent for 3 seconds, and finishes inside the deadline, is accepted. Once the total deadline has passed, `deadline` takes precedence over every other category.
+
+**Nothing unexpected escapes.** An unexpected internal error while fetching (for example the operating system refusing to create a thread or a socket) is also reported as one of these categories, never as its own error text: `dns` if the resolver thread cannot be started, otherwise the phase it happened in (`connect`, `tls`, or `body` when no phase fits). It starts the same 5 second failure backoff and gives the same generic 503 as any other key failure. If an address cannot be used at all (for example an IPv6 address on a host without IPv6), the next address is tried.
 
 The log event is `auth_keys_unavailable_<category>` (for example `auth_keys_unavailable_deadline`). The API answer is always the generic `503 service_unavailable`; the category is not in the response. `python -m app.tools.check_token` prints one fixed sentence per category.
 
