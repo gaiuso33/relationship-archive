@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import health, me
+from app.api import health, me, people
 from app.core.auth import JwksKeyProvider, SigningKeyProvider, TokenVerifier
 from app.core.config import Settings, get_settings
 from app.core.errors import ErrorResponse, register_exception_handlers
@@ -53,6 +53,7 @@ def create_app(
     register_exception_handlers(application)
     application.include_router(health.router, prefix=API_V1_PREFIX)
     application.include_router(me.router, prefix=API_V1_PREFIX)
+    application.include_router(people.router, prefix=API_V1_PREFIX)
     return application
 
 

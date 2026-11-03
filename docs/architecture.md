@@ -162,7 +162,7 @@ Likely initial endpoints:
 - `GET /api/v1/people/{person_id}/notes` — list notes for an authorized person.
 - `POST /api/v1/people/{person_id}/notes` — add a note.
 
-These endpoints are planned contracts, not implemented functionality.
+The people endpoints (`/api/v1/people`) are implemented; their contract, limits and ownership rules are in [people-api.md](people-api.md). Another user's person is reported as `404`, the same as a missing one. The notes endpoints are planned contracts, not implemented functionality.
 
 All inputs and outputs must be validated. Responses must avoid exposing database internals, authentication secrets, or unrelated personal records.
 
