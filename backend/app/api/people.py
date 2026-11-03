@@ -24,8 +24,10 @@ def no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-# Authentication runs first (router dependencies precede parameter dependencies), so an
-# unauthenticated request is rejected before a database session or a body is touched.
+# Router dependencies run before parameter dependencies, so authentication happens before a
+# database session is opened or the owner is used. FastAPI parses the raw request body before
+# it runs any dependency, so a body that is not valid JSON is answered with 422 even without a
+# token. Once the JSON parses, an unauthenticated request gets 401 before field validation.
 router = APIRouter(
     prefix="/people",
     tags=["people"],

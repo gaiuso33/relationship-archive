@@ -4,8 +4,9 @@ The owner-scoped people endpoints (issue #12). Every person belongs to exactly o
 that user is the only one who can see or change them ([ADR-002](decisions/ADR-002-authentication-and-authorization.md)).
 
 All endpoints are under `/api/v1/people`, require `Authorization: Bearer <access token>`
-([authentication.md](authentication.md)), and send `Cache-Control: no-store`. Errors use the
-standard format in [logging-and-errors.md](logging-and-errors.md).
+([authentication.md](authentication.md)). Successful responses send `Cache-Control: no-store`;
+error responses (401, 404, 422, 503) do not currently send it, and they contain no personal
+data. Errors use the standard format in [logging-and-errors.md](logging-and-errors.md).
 
 ## Endpoints
 
