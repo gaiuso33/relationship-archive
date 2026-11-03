@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
-from tests.db_support import build_test_engine
+from tests.db_support import build_test_engine, ensure_head
 
 
 @pytest.fixture(scope="session")
@@ -18,6 +18,13 @@ def db_engine() -> Iterator[Engine]:
     engine = build_test_engine(url.get_secret_value() if url else None)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture
+def migrated_engine(db_engine: Engine) -> Engine:
+    """The test database with the real migrations applied, as production would have it."""
+    ensure_head(db_engine)
+    return db_engine
 
 
 @pytest.fixture
