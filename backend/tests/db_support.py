@@ -65,7 +65,7 @@ def reset_schema(connection: Connection) -> None:
 
     Only ever called on the dedicated `*_test` database (see `build_test_engine`).
     """
-    connection.execute(text("drop table if exists people, alembic_version cascade"))
+    connection.execute(text("drop table if exists notes, people, alembic_version cascade"))
 
 
 def ensure_head(engine: Engine) -> None:

@@ -158,11 +158,13 @@ Likely initial endpoints:
 - `POST /api/v1/people` — create a person.
 - `GET /api/v1/people/{person_id}` — retrieve an authorized person.
 - `PATCH /api/v1/people/{person_id}` — update an authorized person.
-- `DELETE /api/v1/people/{person_id}` — delete an authorized person.
-- `GET /api/v1/people/{person_id}/notes` — list notes for an authorized person.
+- `DELETE /api/v1/people/{person_id}` — delete an authorized person, and their notes.
+- `GET /api/v1/people/{person_id}/notes` — list notes for an authorized person (paginated).
 - `POST /api/v1/people/{person_id}/notes` — add a note.
+- `PATCH /api/v1/people/{person_id}/notes/{note_id}` — edit a note.
+- `DELETE /api/v1/people/{person_id}/notes/{note_id}` — delete a note.
 
-The people endpoints (`/api/v1/people`) are implemented; their contract, limits and ownership rules are in [people-api.md](people-api.md). Another user's person is reported as `404`, the same as a missing one. The notes endpoints are planned contracts, not implemented functionality.
+The people endpoints (`/api/v1/people`) are implemented; their contract, limits and ownership rules are in [people-api.md](people-api.md). Another user's person is reported as `404`, the same as a missing one. The notes endpoints are implemented too, including edit and delete, which extend the original list-and-add contract at the owner's approval (issue #13); see [notes-api.md](notes-api.md). A note's person and owner are checked together, and a missing or foreign person or note is also `404`.
 
 All inputs and outputs must be validated. Responses must avoid exposing database internals, authentication secrets, or unrelated personal records.
 
