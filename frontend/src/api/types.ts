@@ -1,0 +1,14 @@
+/** `GET /api/v1/me`. The user id is the only thing the API returns about the session. */
+export interface MeResponse {
+  user_id: string;
+}
+
+export type ApiErrorKind =
+  | "unauthorized" // 401: the session is not valid
+  | "unavailable" // 503: the API cannot verify tokens right now
+  | "network" // the request never completed
+  | "not_found" // 404
+  | "invalid" // 422 or another 4xx the caller caused
+  | "server" // other 5xx
+  | "unexpected" // a response we cannot interpret
+  | "aborted"; // cancelled by the caller

@@ -47,7 +47,7 @@ The defaults in `.env.example` work with the local database described in [sectio
 
 Settings are read from real environment variables first and then from the `.env` file in the repository root. Restart the backend after changing them.
 
-Later issues add further settings (for example the frontend's Supabase sign-in in #11). Each one adds placeholders to `.env.example` and documents where to obtain the real value. Real values live only in your local `.env` or the project's approved secret store.
+The frontend's own settings (`VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `VITE_API_BASE_URL`) are public and live in `frontend/.env.example` (see section 5). Later issues add further settings, each with placeholders in the matching `.env.example` and a note on where to obtain the real value. Real values live only in your local `.env` or the project's approved secret store.
 
 ## 3. Database (PostgreSQL)
 
@@ -135,11 +135,15 @@ cd frontend
 npm ci
 ```
 
+Create `frontend/.env.local` from `frontend/.env.example` with your non-production Supabase project's URL and **publishable** key, and `VITE_API_BASE_URL=/`. The frontend only ever holds public values: never put a service-role key, a secret key or any backend setting in a `VITE_` variable. See [frontend-auth.md](frontend-auth.md).
+
 Run the development server. The URL is printed in the terminal, by default <http://localhost:5173>:
 
 ```sh
 npm run dev
 ```
+
+Vite proxies `/api/...` to the backend at `http://127.0.0.1:8000` (change it with `DEV_API_PROXY_TARGET`), so no CORS configuration is needed locally. The proxy is for development only: the production API origin and CORS are open under issue #33. Signing in needs a real Supabase project; the automated tests do not.
 
 Checks and build, the same as CI's "Frontend checks":
 
