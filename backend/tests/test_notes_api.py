@@ -10,11 +10,13 @@ except in a successful response to its owner.
 import inspect
 import io
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import psycopg.errors
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -475,6 +477,12 @@ def test_list_filters_by_owner_even_if_the_database_key_were_missing(
         ),
         {"o": USER_B, "p": person_a},
     )
+    # Precondition: the planted row really is in the table, so the list below has something
+    # it must leave out. Without it this test could pass for an unrelated reason.
+    assert sorted((row[1], row[3]) for row in note_rows(session)) == [
+        (USER_A, "Mine"),
+        (USER_B, "Planted by someone else"),
+    ]
 
     listed = client.get(notes_url(person_a), headers=as_a).json()["items"]
 
@@ -617,6 +625,204 @@ def test_a_failed_cross_user_person_delete_keeps_the_notes(
     assert_not_found(client.delete(f"{PEOPLE}/{person_b}", headers=as_a))
 
     assert note_count(session) == 1
+
+
+# --- a person deleted while a note is being added -------------------------------------------------
+#
+# `create_note` tests that the person is the caller's and inserts in one statement. If a
+# concurrent request deletes the person after that test but before the foreign key is checked,
+# PostgreSQL raises a foreign-key violation (SQLSTATE 23503). The service must treat it as "the
+# person does not exist" (None, so 404) and roll the session back. These tests make that race
+# deterministic without sleeping: one connection deletes the person but does not commit, the
+# insert is started on another and blocks on the foreign-key lock, and the test commits the
+# delete only once PostgreSQL itself reports the insert waiting for that lock.
+
+
+@pytest.fixture
+def committed_person(migrated_engine: Engine) -> Iterator[tuple[uuid.UUID, uuid.UUID]]:
+    """A person that other connections can see (committed), removed again afterwards."""
+    owner, person = uuid.uuid4(), uuid.uuid4()
+    with migrated_engine.begin() as connection:
+        connection.execute(
+            text("insert into people (id, owner_id, display_name) values (:p, :o, 'Synthetic')"),
+            {"p": person, "o": owner},
+        )
+    try:
+        yield owner, person
+    finally:
+        with migrated_engine.begin() as connection:
+            connection.execute(text("delete from people where owner_id = :o"), {"o": owner})
+
+
+def wait_until_an_insert_is_blocked_on_a_lock(engine: Engine, timeout: float = 10.0) -> None:
+    """Return once PostgreSQL shows a notes INSERT waiting on a lock (a condition, not a delay)."""
+    deadline = time.monotonic() + timeout
+    # Autocommit matters: inside one transaction PostgreSQL keeps showing the same snapshot of
+    # pg_stat_activity, so a poll that began before the insert would never see it.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        while time.monotonic() < deadline:
+            waiting = connection.execute(
+                text(
+                    "select count(*) from pg_stat_activity "
+                    "where datname = current_database() and pid <> pg_backend_pid() "
+                    "and wait_event_type = 'Lock' and query like 'INSERT INTO notes%'"
+                )
+            ).scalar_one()
+            if waiting:
+                return
+            time.sleep(0.01)
+    raise AssertionError("the note insert never blocked on the in-flight person delete")
+
+
+def while_the_person_is_being_deleted(
+    engine: Engine, person_id: uuid.UUID, action: Callable[[], Any]
+) -> Any:
+    """Run `action` (which adds a note) while a delete of the person is in flight, then commit it.
+
+    The delete holds the person's row lock without committing. `action` runs on a thread, passes
+    its ownership test (the person is still visible) and blocks on the foreign-key check. Only then
+    does the delete commit, so the check fails exactly as in the real race.
+    """
+    deleter = engine.connect()
+    transaction = deleter.begin()
+    deleter.execute(text("delete from people where id = :p"), {"p": person_id})
+    outcome: dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            outcome["value"] = action()
+        except BaseException as error:  # reported to the test thread below
+            outcome["error"] = error
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    try:
+        wait_until_an_insert_is_blocked_on_a_lock(engine)
+    finally:
+        transaction.commit()
+        deleter.close()
+        thread.join(timeout=20)
+    assert not thread.is_alive(), "the insert did not finish after the delete committed"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def notes_for(engine: Engine, person_id: uuid.UUID) -> int:
+    with engine.connect() as connection:
+        return connection.execute(
+            text("select count(*) from notes where person_id = :p"), {"p": person_id}
+        ).scalar_one()
+
+
+def test_a_person_deleted_during_create_is_handled_as_not_found_by_the_service(
+    migrated_engine: Engine, committed_person: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    owner, person = committed_person
+    with Session(migrated_engine, expire_on_commit=False) as session:
+
+        def add_note() -> object:
+            return notes_service.create_note(session, owner, person, SECRET_NOTE)
+
+        result = while_the_person_is_being_deleted(migrated_engine, person, add_note)
+
+        # The foreign-key violation was absorbed, not raised, and the answer is "not found".
+        assert result is None
+        # The session was rolled back: no failed transaction is left, and it is usable again.
+        assert not session.in_transaction()
+        assert session.execute(text("select 1")).scalar_one() == 1
+    assert notes_for(migrated_engine, person) == 0
+
+
+def test_a_person_deleted_during_create_is_a_404_through_the_api(
+    log_format: str,
+    log_stream: io.StringIO,
+    keys: a.FakeKeys,
+    migrated_engine: Engine,
+    committed_person: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    owner, person = committed_person
+    settings = a.auth_settings(log_level="DEBUG", log_format=log_format)
+    application = create_app(settings, keys)
+    configure_logging(settings, log_stream)
+
+    def request_scoped_session() -> Iterator[Session]:
+        # As in production: a new session for every request.
+        with Session(migrated_engine, expire_on_commit=False) as session:
+            yield session
+
+    application.dependency_overrides[get_session] = request_scoped_session
+    client = TestClient(application, raise_server_exceptions=False)
+    headers = auth(str(owner))
+
+    def add_note():
+        return client.post(notes_url(person), json={"content": SECRET_NOTE}, headers=headers)
+
+    raced = while_the_person_is_being_deleted(migrated_engine, person, add_note)
+    absent = client.post(notes_url(uuid.uuid4()), json={"content": SECRET_NOTE}, headers=headers)
+
+    assert_not_found(raced)
+    assert_not_found(absent)
+    raced_error, absent_error = raced.json()["error"], absent.json()["error"]
+    raced_error.pop("request_id"), absent_error.pop("request_id")
+    assert raced_error == absent_error  # the same 404 as a person that never existed
+    assert notes_for(migrated_engine, person) == 0
+    assert SECRET_NOTE not in raced.text
+    assert SECRET_NOTE not in log_stream.getvalue()
+
+
+def integrity_error(violation: type[psycopg.errors.IntegrityError]) -> IntegrityError:
+    return IntegrityError("INSERT INTO notes ...", {}, violation())
+
+
+def test_only_a_foreign_key_violation_is_treated_as_not_found(
+    client: TestClient, session: Session, as_a: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control for the tests below: the handled error, with the rollback observed."""
+    person = uuid.UUID(make_person(client, as_a))
+    rolled_back: list[bool] = []
+    real_rollback = session.rollback
+
+    def failing_insert(*args: object, **kwargs: object) -> object:
+        raise integrity_error(psycopg.errors.ForeignKeyViolation)
+
+    def spy_rollback() -> None:
+        rolled_back.append(True)
+        real_rollback()
+
+    monkeypatch.setattr(session, "scalars", failing_insert)
+    monkeypatch.setattr(session, "rollback", spy_rollback)
+
+    assert notes_service.create_note(session, uuid.UUID(USER_A), person, "x") is None
+    assert rolled_back == [True]
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        psycopg.errors.UniqueViolation,
+        psycopg.errors.CheckViolation,
+        psycopg.errors.NotNullViolation,
+    ],
+)
+def test_other_integrity_errors_are_not_swallowed_by_create(
+    client: TestClient,
+    session: Session,
+    as_a: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    violation: type[psycopg.errors.IntegrityError],
+) -> None:
+    person = uuid.UUID(make_person(client, as_a))
+
+    def failing_insert(*args: object, **kwargs: object) -> object:
+        raise integrity_error(violation)
+
+    monkeypatch.setattr(session, "scalars", failing_insert)
+
+    with pytest.raises(IntegrityError) as caught:
+        notes_service.create_note(session, uuid.UUID(USER_A), person, "x")
+
+    assert getattr(caught.value.orig, "sqlstate", None) == violation.sqlstate
 
 
 # --- validation -------------------------------------------------------------------------------

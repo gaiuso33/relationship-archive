@@ -48,7 +48,14 @@ and `content` is required. (`PATCH` is used because the note is changed in place
   and tabs are kept.
 - NUL and other control characters (for example `\x00`, `\x07`, `\x1b`, `\x7f`, `\x0b`, `\x0c`,
   `\x85`) are rejected. So are lone surrogate code points, which cannot be stored.
-- Invalid input is always a `422`, never a `500`.
+- Invalid note content, and any other request that fails validation (unknown fields, wrong types,
+  malformed identifiers or pagination values), is a `422`. A request body that cannot be parsed at
+  all gets a fixed error too: malformed JSON is usually a `422`, and a body that is not valid UTF-8
+  is a `400` (`invalid_request`). Which of the two applies depends on how the parser fails, not on
+  the content. Invalid input is never a `500`.
+- Every one of these errors is a fixed, safe response (a code, a fixed message and the request id,
+  with field locations and types for a `422`). It never includes the note text or any part of the
+  request body.
 
 The database enforces the same limits with check constraints (`ck_notes_content_not_blank` and
 `ck_notes_content_max_length`), so no code path can store a blank or oversized note.
