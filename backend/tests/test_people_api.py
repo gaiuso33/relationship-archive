@@ -112,12 +112,17 @@ def people_routes(app: FastAPI) -> list[tuple[str, str]]:
 
 
 def test_the_expected_routes_exist(app: FastAPI) -> None:
+    notes = f"{PEOPLE}/{{person_id}}/notes"
     assert people_routes(app) == [
         ("DELETE", f"{PEOPLE}/{{person_id}}"),
+        ("DELETE", f"{notes}/{{note_id}}"),
         ("GET", PEOPLE),
         ("GET", f"{PEOPLE}/{{person_id}}"),
+        ("GET", notes),
         ("PATCH", f"{PEOPLE}/{{person_id}}"),
+        ("PATCH", f"{notes}/{{note_id}}"),
         ("POST", PEOPLE),
+        ("POST", notes),
     ]
 
 
@@ -136,7 +141,7 @@ def test_every_people_route_rejects_unauthenticated_requests(
     routes = people_routes(app)
     assert routes
     for method, path in routes:
-        url = path.replace("{person_id}", str(uuid.uuid4()))
+        url = path.replace("{person_id}", str(uuid.uuid4())).replace("{note_id}", str(uuid.uuid4()))
         response = client.request(method, url, json={"display_name": "x"})
         assert response.status_code == 401, (method, path)
         error = assert_error(response, 401, "unauthorized")

@@ -16,7 +16,7 @@ data. Errors use the standard format in [logging-and-errors.md](logging-and-erro
 | `POST /people` | 201 `Person` | Create a person. |
 | `GET /people/{person_id}` | 200 `Person` | Retrieve one of the caller's people. |
 | `PATCH /people/{person_id}` | 200 `Person` | Change some fields of one of the caller's people. |
-| `DELETE /people/{person_id}` | 204, no body | Delete one of the caller's people. |
+| `DELETE /people/{person_id}` | 204, no body | Delete one of the caller's people, **and all their notes**. |
 
 Other statuses: `401` (missing or bad token), `404 not_found` (no such person *for this user*),
 `422 validation_error` (invalid input, including a malformed `person_id`), `503` (token
@@ -63,11 +63,20 @@ Requests reject unknown fields. The owner is never part of a request or a respon
 - Names, birthdays and entries are never written to logs or error bodies; a `422` reports only
   field locations and error types.
 
+## Deleting a person deletes their notes
+
+Deleting a person permanently deletes every note about them ([notes-api.md](notes-api.md)).
+This is done by the database (a foreign key with `ON DELETE CASCADE`), not by application code,
+so it cannot be skipped. Notes about the caller's other people, and every other user's notes,
+are not affected. There is no soft delete and no undo, so clients should ask for confirmation.
+
 ## Storage
 
 Table `people` (migration `0002`): `id`, `owner_id` (indexed, no foreign key because users live
 in Supabase), `display_name` (non-blank check), `birthday`, `timezone`, `interests` and
-`preferences` (PostgreSQL `text[]`, default empty), `created_at`, `updated_at`.
+`preferences` (PostgreSQL `text[]`, default empty), `created_at`, `updated_at`. Migration `0003`
+adds the unique constraint `uq_people_id_owner_id` on `(id, owner_id)`, which the notes table's
+composite foreign key refers to.
 
 ## Tests
 
