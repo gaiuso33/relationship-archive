@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, createApiClient } from "./client";
+import { ApiError, createApiClient, isAllowedApiPath } from "./client";
 
 const BASE = "https://api.example.test";
 const TOKEN = "synthetic-access-token-abc123";
@@ -89,6 +89,60 @@ describe("api client", () => {
     expect(error.status).toBe(401);
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  describe("401 and a refreshed session", () => {
+    function withTokens(tokens: (string | null)[], status = 401) {
+      let call = 0;
+      const getAccessToken = vi.fn(async () => tokens[Math.min(call++, tokens.length - 1)]);
+      const fetchImpl = vi.fn(async () => json(status, { error: { code: "unauthorized", request_id: "req-3" } }));
+      const onUnauthorized = vi.fn();
+      const client = createApiClient({
+        baseUrl: BASE,
+        getAccessToken,
+        onUnauthorized,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      return { client, fetchImpl, onUnauthorized, getAccessToken };
+    }
+
+    it("does not end the session when the token that was refused has been replaced", async () => {
+      const { client, fetchImpl, onUnauthorized } = withTokens(["old-token", "new-token"]);
+      const error = await failure(client.getMe());
+      expect(error.kind).toBe("session_changed");
+      expect(error.message).not.toContain("token");
+      expect(onUnauthorized).not.toHaveBeenCalled();
+      expect(fetchImpl).toHaveBeenCalledTimes(1); // and no automatic retry
+    });
+
+    it("ends the session when the token that was refused is still the current one", async () => {
+      const { client, fetchImpl, onUnauthorized } = withTokens(["same-token", "same-token"]);
+      expect((await failure(client.getMe())).kind).toBe("unauthorized");
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("ends the session when there is no session any more", async () => {
+      const { client, onUnauthorized } = withTokens(["old-token", null]);
+      expect((await failure(client.getMe())).kind).toBe("unauthorized");
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    });
+
+    it("ends the session when the current token cannot be read", async () => {
+      let call = 0;
+      const onUnauthorized = vi.fn();
+      const client = createApiClient({
+        baseUrl: BASE,
+        getAccessToken: async () => {
+          if (call++ === 0) return "old-token";
+          throw new Error("storage unavailable");
+        },
+        onUnauthorized,
+        fetchImpl: (async () => json(401, {})) as unknown as typeof fetch,
+      });
+      expect((await failure(client.getMe())).kind).toBe("unauthorized");
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("on 503 reports the service as unavailable and keeps the session", async () => {
@@ -194,5 +248,77 @@ describe("api client", () => {
     });
     expect((await failure(client.getMe())).kind).toBe("unavailable");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  describe("path restrictions", () => {
+    const rejected = [
+      "/api/v1/../admin",
+      "/api/v1/./me",
+      "/api/v1/..",
+      "/api/v1/.",
+      "/api/v1/people/../../admin",
+      "/api/v1/%2e%2e/admin",
+      "/api/v1/%2E%2E/admin",
+      "/api/v1/%2e%2E/admin",
+      "/api/v1/.%2e/admin",
+      "/api/v1/%2e./admin",
+      "/api/v1/%252e%252e/admin",
+      "/api/v1/..%2fadmin",
+      "/api/v1/%2e%2e%2fadmin",
+      "/api/v1/..%5cadmin",
+      "/api/v1/..\\admin",
+      "/api/v1/people/%2f/x",
+      "/api/v1/.hidden",
+      "/api/v1/me?x=1",
+      "/api/v1/me#frag",
+      "/api/v1/me/",
+      "/api/v1//me",
+      "/api/v1/",
+      "/api/v1",
+      "/api/v2/me",
+      "/api/v10/me",
+      "/api",
+      "/admin",
+      "//evil.example/api/v1/me",
+      "https://evil.example/api/v1/me",
+      "api/v1/me",
+      "/api/v1/me ",
+      "/api/v1/m e",
+      "/api/v1/me\n",
+      "/api/v1/\u2025/x",
+      "",
+    ];
+
+    it.each(rejected)("rejects %j before the token is read or anything is sent", async (path) => {
+      const getAccessToken = vi.fn(async () => TOKEN);
+      const fetchImpl = vi.fn();
+      const onUnauthorized = vi.fn();
+      const client = createApiClient({
+        baseUrl: BASE,
+        getAccessToken,
+        onUnauthorized,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect((await failure(client.getJson(path))).kind).toBe("unexpected");
+      expect(getAccessToken).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(onUnauthorized).not.toHaveBeenCalled();
+    });
+
+    it.each(["/api/v1/me", "/api/v1/people", "/api/v1/people/11111111-1111-4111-8111-111111111111/notes", "/api/v1/a.b/c_d~e-f"])(
+      "accepts the plain path %s",
+      async (path) => {
+        const { client, fetchImpl } = setup({ response: () => json(200, { ok: true }) });
+        await expect(client.getJson(path)).resolves.toEqual({ ok: true });
+        const [url] = fetchImpl.mock.calls[0] as unknown as [URL];
+        expect(url.pathname).toBe(path);
+        expect(url.origin).toBe(BASE);
+      },
+    );
+
+    it("agrees with the guard that the helper reports", () => {
+      for (const path of rejected) expect(isAllowedApiPath(path)).toBe(false);
+      expect(isAllowedApiPath("/api/v1/me")).toBe(true);
+    });
   });
 });

@@ -3,6 +3,7 @@ import type { ApiErrorKind, MeResponse } from "./types";
 /** Fixed, user-safe text for each kind. Nothing from a response body is ever put in a message. */
 const MESSAGES: Record<ApiErrorKind, string> = {
   unauthorized: "Your session has ended. Please sign in again.",
+  session_changed: "Your session was just refreshed. Please try again.",
   unavailable: "The service is temporarily unavailable. Please try again in a moment.",
   network: "We could not reach the service. Check your connection and try again.",
   not_found: "That could not be found.",
@@ -44,8 +45,18 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** Only these API paths may be requested, so a bug cannot aim the token at another resource. */
-const ALLOWED_PATH = /^\/api\/v1\/[A-Za-z0-9._~\-/]*$/;
+/**
+ * Only plain `/api/v1/...` paths may be requested, so a bug cannot aim the token at another
+ * resource. Every segment starts with a letter, digit, `_`, `~` or `-`, which rules out `.` and
+ * `..` (and any hidden-file style name). `%` is not allowed at all, so no encoded form of a dot
+ * segment (`%2e`, `%2E%2e`, `%252e`) or of a slash can get through; neither can `\`, `?`, `#`,
+ * an empty segment (`//`) or a trailing slash.
+ */
+const ALLOWED_PATH = /^\/api\/v1\/[A-Za-z0-9_~-][A-Za-z0-9._~-]*(?:\/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*$/;
+
+export function isAllowedApiPath(path: string): boolean {
+  return ALLOWED_PATH.test(path);
+}
 
 const CODE_SHAPE = /^[a-z][a-z0-9_]{0,63}$/;
 const REQUEST_ID_SHAPE = /^[A-Za-z0-9-]{1,64}$/;
@@ -67,6 +78,8 @@ async function readErrorDetails(response: Response): Promise<{ code: string | nu
 }
 
 export interface ApiClient {
+  /** Authenticated `GET` of a `/api/v1/...` path, returning the parsed JSON. For the typed calls below and later screens. */
+  getJson(path: string, options?: RequestOptions): Promise<unknown>;
   getMe(options?: RequestOptions): Promise<MeResponse>;
 }
 
@@ -74,12 +87,26 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const { baseUrl, getAccessToken, onUnauthorized } = options;
   const fetchImpl = options.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
 
+  /** True only if there is a current token and it differs from the one that was sent. */
+  async function tokenWasReplaced(sent: string): Promise<boolean> {
+    try {
+      const current = await getAccessToken();
+      return current !== null && current !== sent;
+    } catch {
+      return false;
+    }
+  }
+
   async function requestJson(path: string, { signal }: RequestOptions = {}): Promise<unknown> {
-    if (!ALLOWED_PATH.test(path)) throw new ApiError("unexpected");
+    // Checked before anything else: a rejected path never reaches the token provider or `fetch`.
+    if (!isAllowedApiPath(path)) throw new ApiError("unexpected");
     const origin = baseUrl === "" ? globalThis.location.origin : baseUrl;
     const url = new URL(path, origin);
-    // The token goes only to the configured API origin.
-    if (url.origin !== origin) throw new ApiError("unexpected");
+    // The token goes only to the configured API origin, and the URL must be exactly the path
+    // that was checked (no normalisation may have changed it).
+    if (url.origin !== origin || url.pathname !== path || url.search !== "" || url.hash !== "") {
+      throw new ApiError("unexpected");
+    }
 
     let token: string | null;
     try {
@@ -120,6 +147,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     const details = await readErrorDetails(response);
     const info = { status: response.status, ...details };
     if (response.status === 401) {
+      // The API refused the token we sent. If the session has since been refreshed, the newer
+      // token is not the one that was refused, so the session is not ended. The caller may try
+      // again; this client never retries by itself.
+      if (await tokenWasReplaced(token)) throw new ApiError("session_changed", info);
       onUnauthorized();
       throw new ApiError("unauthorized", info);
     }
@@ -130,6 +161,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   }
 
   return {
+    getJson: requestJson,
     async getMe(requestOptions) {
       const body = await requestJson("/api/v1/me", requestOptions);
       const userId = typeof body === "object" && body !== null ? (body as { user_id?: unknown }).user_id : undefined;

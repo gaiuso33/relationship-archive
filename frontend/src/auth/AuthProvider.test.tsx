@@ -108,17 +108,50 @@ describe("AuthProvider", () => {
     await act(async () => screen.getByRole("button", { name: "out" }).click());
     expect(status()).toBe("signedOut");
     expect(auth.signOut).toHaveBeenCalledWith({ scope: "local" });
-    expect(window.__result).toBe("true");
+    expect(window.__result).toBe("signed_out");
   });
 
-  it("stays signed in and says so when sign-out fails", async () => {
+  it("reports a clean sign-out", async () => {
     const auth = new FakeAuth(sessionFor(USER_A));
-    auth.signOutError = { name: "AuthRetryableFetchError" };
+    mount(auth);
+    await waitFor(() => expect(status()).toBe("signedIn"));
+    await act(async () => screen.getByRole("button", { name: "out" }).click());
+    expect(window.__result).toBe("signed_out");
+  });
+
+  it("is signed out on this device, and says the service was not reached, when the network is down", async () => {
+    // Like the real SDK: the stored session is removed and SIGNED_OUT is emitted, but the call
+    // reports an error because the refresh token could not be revoked.
+    const auth = new FakeAuth(sessionFor(USER_A));
+    auth.signOutMode = "network";
+    mount(auth);
+    await waitFor(() => expect(status()).toBe("signedIn"));
+    await act(async () => screen.getByRole("button", { name: "out" }).click());
+    expect(status()).toBe("signedOut:local_only");
+    expect(window.__result).toBe("local_only");
+    expect(auth.session).toBeNull();
+  });
+
+  it("stays signed in and reports a failure only if the session is really still there", async () => {
+    const auth = new FakeAuth(sessionFor(USER_A));
+    auth.signOutMode = "stuck";
     mount(auth);
     await waitFor(() => expect(status()).toBe("signedIn"));
     await act(async () => screen.getByRole("button", { name: "out" }).click());
     expect(status()).toBe("signedIn");
-    expect(window.__result).toBe("false");
+    expect(window.__result).toBe("failed");
+  });
+
+  it("treats a thrown sign-out as a failure when the session cannot be confirmed gone", async () => {
+    const auth = new FakeAuth(sessionFor(USER_A));
+    auth.signOut.mockRejectedValueOnce(new Error("boom"));
+    auth.getSession.mockResolvedValueOnce({ data: { session: sessionFor(USER_A) } }); // initial
+    auth.getSession.mockRejectedValueOnce(new Error("storage unavailable")); // the check
+    mount(auth);
+    await waitFor(() => expect(status()).toBe("signedIn"));
+    await act(async () => screen.getByRole("button", { name: "out" }).click());
+    expect(window.__result).toBe("failed");
+    expect(status()).toBe("signedIn");
   });
 
   it("signs in successfully", async () => {
@@ -133,6 +166,8 @@ describe("AuthProvider", () => {
 
   it.each([
     ["a rejected password", { status: 400, name: "AuthApiError" }, "rejected"],
+    ["a rate limit by status", { status: 429, name: "AuthApiError" }, "rate_limited"],
+    ["a rate limit by code", { status: 400, code: "over_request_rate_limit" }, "rate_limited"],
     ["a server error", { status: 503, name: "AuthApiError" }, "unavailable"],
     ["a network failure", { name: "AuthRetryableFetchError", status: 0 }, "unavailable"],
   ])("reports %s without detail", async (_name, error, reason) => {
@@ -143,6 +178,16 @@ describe("AuthProvider", () => {
     await act(async () => screen.getByRole("button", { name: "in" }).click());
     expect(status()).toBe("signedOut");
     expect(window.__result).toBe(JSON.stringify({ ok: false, reason }));
+  });
+
+  it("does not report success when there is neither a session nor an error", async () => {
+    const auth = new FakeAuth(null);
+    auth.signInWithPassword.mockResolvedValueOnce({ data: { session: null }, error: null });
+    mount(auth);
+    await waitFor(() => expect(status()).toBe("signedOut"));
+    await act(async () => screen.getByRole("button", { name: "in" }).click());
+    expect(window.__result).toBe(JSON.stringify({ ok: false, reason: "rejected" }));
+    expect(status()).toBe("signedOut");
   });
 
   it("reports a thrown sign-in as unavailable", async () => {

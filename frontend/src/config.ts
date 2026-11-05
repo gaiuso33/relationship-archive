@@ -119,7 +119,19 @@ export function parseConfig(env: RawEnv): AppConfig {
   return { supabaseUrl, supabasePublishableKey: key, apiBaseUrl };
 }
 
-/** Reads the configuration Vite embedded at build time. */
-export function loadConfig(env: RawEnv = import.meta.env): AppConfig {
+/**
+ * Reads the configuration Vite embedded at build time.
+ *
+ * Each variable is named explicitly. Vite replaces `import.meta.env.VITE_NAME` with just that
+ * value, but a bare `import.meta.env` would embed *every* `VITE_*` variable present at build
+ * time, including one added by mistake. Do not pass or spread the whole object.
+ */
+export function loadConfig(
+  env: RawEnv = {
+    VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
+    VITE_SUPABASE_PUBLISHABLE_KEY: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+    VITE_API_BASE_URL: import.meta.env.VITE_API_BASE_URL,
+  },
+): AppConfig {
   return parseConfig(env);
 }

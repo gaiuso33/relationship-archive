@@ -8,6 +8,12 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 320;
 const MAX_PASSWORD_LENGTH = 1024;
 
+const SIGN_IN_FAILURES = {
+  rejected: "We could not sign you in. Check your email and password and try again.",
+  rate_limited: "Too many sign-in attempts. Please wait a few minutes and try again.",
+  unavailable: "Sign-in is temporarily unavailable. Please try again in a moment.",
+} as const;
+
 interface FieldErrors {
   email?: string;
   password?: string;
@@ -34,6 +40,14 @@ export function SignInPage() {
   if (state.status === "signedIn") {
     return <Navigate to={safeInternalPath(searchParams.get("next"))} replace />;
   }
+  if (state.status === "loading") {
+    // No form until we know whether there already is a session.
+    return (
+      <main>
+        <p role="status">Checking your session…</p>
+      </main>
+    );
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,11 +64,7 @@ export function SignInPage() {
     if (!result.ok) {
       // The same wording whatever was wrong, so the form cannot be used to find out which
       // email addresses have accounts.
-      setFormError(
-        result.reason === "unavailable"
-          ? "Sign-in is temporarily unavailable. Please try again in a moment."
-          : "We could not sign you in. Check your email and password and try again.",
-      );
+      setFormError(SIGN_IN_FAILURES[result.reason]);
       setPassword("");
     }
     // On success the provider reports the new session and this component redirects.
@@ -63,8 +73,11 @@ export function SignInPage() {
   return (
     <main>
       <h1>Sign in</h1>
-      {state.status === "signedOut" && state.reason === "ended" && (
-        <p role="status">Your session has ended. Please sign in again.</p>
+      {state.reason === "ended" && <p role="status">Your session has ended. Please sign in again.</p>}
+      {state.reason === "local_only" && (
+        <p role="status">
+          You are signed out on this device, but we could not reach the service to end the session there.
+        </p>
       )}
       <form onSubmit={handleSubmit} noValidate aria-busy={submitting}>
         <p>

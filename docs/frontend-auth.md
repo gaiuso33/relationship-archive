@@ -39,8 +39,12 @@ The application refuses to start if the publishable key is a secret key or a ser
 value is missing, or if a Supabase or API URL is not `https` (outside loopback), carries
 credentials, or has a path. The error names the variable and the rule, never the value.
 
-A test builds the production bundle and checks that non-`VITE_` values are not in it, and that it
-holds no secret-key-shaped value and no service-role token.
+`src/config.ts` names each of the three variables explicitly. Vite embeds a variable that is
+referenced by name, but a bare `import.meta.env` would embed **every** `VITE_*` variable present at
+build time, including one added by mistake, so the whole object is never used. A test builds the
+production bundle with a stray `VITE_STRAY_PRIVATE` canary and with non-`VITE_` canaries, and checks
+that none of them is in it, that the three real values still are, and that the bundle holds no
+secret-key-shaped value and no service-role token.
 
 ## Local development
 
@@ -67,11 +71,24 @@ any.
   backslash, no control characters or spaces, nothing that resolves to another origin. Absolute,
   protocol-relative and `javascript:` values go to `/`. The guard is a convenience: **it is not
   security**, and the API checks the token on every request.
-- **Sign-in.** An accessible form with client-side checks. Every rejected sign-in shows the same
-  message ("We could not sign you in..."), so the form cannot be used to learn which emails have
-  accounts. A network or server failure says the service is unavailable instead.
-- **Sign-out.** Ends the session on this device (and revokes it at Supabase when reachable). If that
-  fails the user stays signed in and is told so.
+- **Sign-in.** An accessible form with client-side checks. It is not shown while the session is
+  still loading (a status message is shown instead), so it never flashes at a user who is already
+  signed in. Every rejected sign-in shows the same message ("We could not sign you in..."), so the
+  form cannot be used to learn which emails have accounts. A rate limit (429) says "too many
+  attempts, wait a few minutes", a network or server failure says the service is unavailable, and
+  a response with neither a session nor an error is shown as the same generic failure rather than
+  being ignored.
+- **Sign-out.** Ends the session on this device and, when the service can be reached, revokes it
+  there. The SDK removes the stored session *first* and then asks the service to revoke the
+  refresh token (checked against `@supabase/supabase-js` 2.119.0, with the network down: the
+  stored session was removed and `SIGNED_OUT` was emitted, yet the call returned a network
+  error). So an error from the SDK does not mean the user is still signed in. After an error the
+  application checks whether a session is still stored:
+  - none left: the user is signed out **on this device**, and is told "You are signed out on this
+    device, but we could not reach the service to end the session there". The refresh token may
+    not have been revoked at Supabase, so on a device you do not control, sign in and out again
+    when you are back online (or revoke sessions from your Supabase account);
+  - a session is still stored: the user stays signed in and is told "We could not sign you out".
 - **Session refresh and expiry.** The SDK refreshes the access token before it expires. If the
   session ends without the user asking (refresh failure, or sign-out in another tab) the user is
   returned to sign-in with "Your session has ended".
@@ -79,13 +96,18 @@ any.
 ## The API client
 
 `src/api/client.ts` takes the access-token provider as an argument. It sends
-`Authorization: Bearer <token>` to the configured API origin only, for `/api/v1/...` paths only,
-with no cookies, no caching and no redirects. The token never goes in a URL, a query string, a log
+`Authorization: Bearer <token>` to the configured API origin only, for plain `/api/v1/...` paths
+only, with no cookies, no caching and no redirects. A path is checked before the token is even
+read: every segment must start with a letter, digit, `_`, `~` or `-`, so `.` and `..` segments are
+refused, and `%` is not accepted at all, so no encoded dot segment (`%2e%2e`, `%252e`) or slash
+gets through. Backslashes, queries, fragments, empty segments and trailing slashes are refused too,
+and the URL that is built must equal the checked path exactly. A refused path never reaches the
+token provider or `fetch`. The token never goes in a URL, a query string, a log
 or an error. Requests can be cancelled with an `AbortSignal`.
 
 | Outcome | Behaviour |
 |---|---|
-| `401` | The session is ended locally, once, and the user goes to sign-in. No retry. |
+| `401` | The session is ended locally, once, and the user goes to sign-in. No retry. **Unless the token that was refused is no longer the current one**: if the SDK has refreshed the session while the request was in flight, the newer session is kept and the user is told "Your session was just refreshed. Please try again." The client never retries by itself. |
 | No session | The API is not called; treated like a `401`. |
 | `503` | "Temporarily unavailable" with a retry button. The user stays signed in. |
 | Network failure | A connectivity message. The user stays signed in. |

@@ -5,6 +5,7 @@ export interface MeResponse {
 
 export type ApiErrorKind =
   | "unauthorized" // 401: the session is not valid
+  | "session_changed" // 401 for a token that has since been replaced by a newer one
   | "unavailable" // 503: the API cannot verify tokens right now
   | "network" // the request never completed
   | "not_found" // 404

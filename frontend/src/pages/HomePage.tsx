@@ -41,7 +41,7 @@ export function HomePage() {
 
   async function handleSignOut() {
     setSignOutFailed(false);
-    if (!(await signOut())) setSignOutFailed(true);
+    if ((await signOut()) === "failed") setSignOutFailed(true);
   }
 
   return (
@@ -59,7 +59,7 @@ export function HomePage() {
           </button>
         </div>
       )}
-      {signOutFailed && <p role="alert">We could not sign you out. Check your connection and try again.</p>}
+      {signOutFailed && <p role="alert">We could not sign you out. Please try again.</p>}
       <button type="button" onClick={handleSignOut}>
         Sign out
       </button>

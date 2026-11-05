@@ -21,11 +21,15 @@ describe("production build", () => {
       DATABASE_URL: "postgresql://canary-user:canary-password@db.example.test/canary",
       DEV_API_PROXY_TARGET: "http://canary-backend.internal:8000",
     };
+    // A `VITE_` variable that nothing asked for, added by mistake. Only the three variables the
+    // application names may be embedded, so this must not appear either.
+    const strayVite = { VITE_STRAY_PRIVATE: "canary-stray-vite-value-4d2e" };
     const settings: Env = {
       VITE_SUPABASE_URL: "https://synthetic-project.supabase.co",
       VITE_SUPABASE_PUBLISHABLE_KEY: publishable,
       VITE_API_BASE_URL: "/",
       ...canaries,
+      ...strayVite,
     };
     const previous: Env = {};
     for (const [key, value] of Object.entries(settings)) {
@@ -54,6 +58,9 @@ describe("production build", () => {
     expect(text).toContain("synthetic-project.supabase.co");
     // ...and nothing else from the environment is.
     for (const value of Object.values(canaries)) expect(text).not.toContain(value);
+    // ...including an unrequested VITE_ variable.
+    for (const value of Object.values(strayVite)) expect(text).not.toContain(value);
+    expect(text).not.toContain("VITE_STRAY_PRIVATE");
     // No secret-key shaped value and no service-role JWT, whatever its source.
     expect(text).not.toMatch(/sb_secret_[A-Za-z0-9_-]{8,}/);
     const jwts = text.match(/eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g) ?? [];

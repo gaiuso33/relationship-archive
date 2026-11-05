@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AuthContext } from "./authContext";
-import type { AuthClient, AuthContextValue, AuthState, SessionLike, SignInResult } from "./types";
+import type { AuthClient, AuthContextValue, AuthState, SessionLike, SignInResult, SignOutResult } from "./types";
 
 /**
  * Works out the next state from the session the SDK reports. Returns the same object when nothing
@@ -21,11 +21,13 @@ function nextState(previous: AuthState, session: SessionLike | null, userInitiat
   return previous.status === "signedOut" ? previous : { status: "signedOut" };
 }
 
-/** Network and server problems are "unavailable"; anything else is a generic rejection. */
-function isServiceProblem(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const { name, status } = error as { name?: unknown; status?: unknown };
-  return name === "AuthRetryableFetchError" || (typeof status === "number" && status >= 500);
+/** Sorts a sign-in error into what the user needs to know. Nothing from the error is kept. */
+function classifySignInError(error: unknown): "rejected" | "rate_limited" | "unavailable" {
+  if (typeof error !== "object" || error === null) return "rejected";
+  const { name, status, code } = error as { name?: unknown; status?: unknown; code?: unknown };
+  if (status === 429 || code === "over_request_rate_limit") return "rate_limited";
+  if (name === "AuthRetryableFetchError" || (typeof status === "number" && status >= 500)) return "unavailable";
+  return "rejected";
 }
 
 export function AuthProvider({ auth, children }: { auth: AuthClient; children: ReactNode }) {
@@ -69,11 +71,11 @@ export function AuthProvider({ auth, children }: { auth: AuthClient; children: R
     async (email: string, password: string): Promise<SignInResult> => {
       try {
         const { data, error } = await auth.signInWithPassword({ email, password });
-        if (error) return { ok: false, reason: isServiceProblem(error) ? "unavailable" : "rejected" };
-        if (data.session) {
-          const session = data.session;
-          setState((previous) => nextState(previous, session, false));
-        }
+        if (error) return { ok: false, reason: classifySignInError(error) };
+        const session = data.session;
+        // No error and no session should not happen. Do not pretend it worked.
+        if (!session) return { ok: false, reason: "rejected" };
+        setState((previous) => nextState(previous, session, false));
         return { ok: true };
       } catch {
         return { ok: false, reason: "unavailable" };
@@ -82,15 +84,30 @@ export function AuthProvider({ auth, children }: { auth: AuthClient; children: R
     [auth],
   );
 
-  const signOut = useCallback(async (): Promise<boolean> => {
+  const signOut = useCallback(async (): Promise<SignOutResult> => {
     userInitiated.current = true;
     try {
-      const { error } = await auth.signOut({ scope: "local" });
-      if (error) return false;
-      setState({ status: "signedOut" });
-      return true;
-    } catch {
-      return false;
+      let failed = false;
+      try {
+        failed = Boolean((await auth.signOut({ scope: "local" })).error);
+      } catch {
+        failed = true;
+      }
+      if (!failed) {
+        setState({ status: "signedOut" });
+        return "signed_out";
+      }
+      // The SDK removes the stored session *before* it contacts the service, and reports
+      // `SIGNED_OUT`, so an error here (typically a network failure while revoking the refresh
+      // token) can still mean this device is signed out. Ask rather than assume.
+      try {
+        const { data } = await auth.getSession();
+        if (data.session !== null) return "failed";
+      } catch {
+        return "failed";
+      }
+      setState({ status: "signedOut", reason: "local_only" });
+      return "local_only";
     } finally {
       userInitiated.current = false;
     }

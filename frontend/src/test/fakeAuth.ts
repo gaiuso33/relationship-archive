@@ -35,7 +35,13 @@ export class FakeAuth implements AuthClient {
   getSessionGate: Deferred<void> | null = null;
   signInResult: { session: SessionLike | null; error: unknown } = { session: null, error: { status: 400 } };
   signInGate: Deferred<void> | null = null;
-  signOutError: unknown = null;
+  /**
+   * How `signOut` behaves. `"network"` mirrors the real SDK (checked against 2.119.0): with the
+   * network down, a local sign-out still removes the stored session and emits `SIGNED_OUT`, yet
+   * returns an error because the refresh token could not be revoked. `"stuck"` returns an error
+   * and leaves the session in place.
+   */
+  signOutMode: "ok" | "network" | "stuck" = "ok";
 
   getSession = vi.fn(async () => {
     const snapshot = this.session;
@@ -68,10 +74,10 @@ export class FakeAuth implements AuthClient {
   });
 
   signOut = vi.fn<AuthClient["signOut"]>(async () => {
-    if (this.signOutError) return { error: this.signOutError };
+    if (this.signOutMode === "stuck") return { error: { name: "AuthUnknownError" } };
     this.session = null;
     this.emit("SIGNED_OUT", null);
-    return { error: null };
+    return { error: this.signOutMode === "network" ? { name: "AuthRetryableFetchError", status: 0 } : null };
   });
 
   constructor(session: SessionLike | null = null) {

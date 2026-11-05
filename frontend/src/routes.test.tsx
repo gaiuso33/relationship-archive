@@ -81,9 +81,21 @@ describe("protected routes", () => {
     expect(auth.signOut).toHaveBeenCalledWith({ scope: "local" });
   });
 
-  it("tells the user if sign-out failed and keeps them signed in", async () => {
+  it("offline sign-out: signed out here, and the user is told the service was not reached", async () => {
     const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    auth.signOutError = { name: "AuthRetryableFetchError" };
+    auth.signOutMode = "network";
+    renderApp({ auth });
+    await screen.findByText("You are signed in.");
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await screen.findByText(/signed out on this device, but we could not reach the service/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not sign you out/i)).not.toBeInTheDocument();
+    expect(auth.session).toBeNull();
+  });
+
+  it("tells the user if the session is really still active after a failed sign-out", async () => {
+    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
+    auth.signOutMode = "stuck";
     renderApp({ auth });
     await screen.findByText("You are signed in.");
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
@@ -101,6 +113,34 @@ describe("home page and API failures", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Your session has ended");
     expect(auth.signOut).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledTimes(1); // no retry loop
+  });
+
+  it("a 401 for a token that was refreshed meanwhile does not sign out the newer session", async () => {
+    // The reproduced race: the request goes out with the old token, the SDK refreshes the
+    // session, then the API answers 401 for the old token.
+    const auth = new FakeAuth(sessionFor(USER_A, "old-token"));
+    const gate = deferred<Response>();
+    let calls = 0;
+    const fetchImpl = vi.fn(() => (++calls === 1 ? gate.promise : Promise.resolve(meResponse())));
+    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    act(() => {
+      auth.session = sessionFor(USER_A, "new-token");
+      auth.emit("TOKEN_REFRESHED", auth.session);
+    });
+    await act(async () => gate.resolve(meResponse(401, { error: { code: "unauthorized", message: "x" } })));
+
+    expect(await screen.findByText(/session was just refreshed/i)).toBeInTheDocument();
+    expect(auth.signOut).not.toHaveBeenCalled();
+    expect(auth.session).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // nothing retried by itself
+
+    // The user may try again, and now the new token is used.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+    const [, init] = fetchImpl.mock.calls[1] as unknown as [URL, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer new-token");
   });
 
   it("on 503 shows a safe message, offers a retry and keeps the session", async () => {
@@ -152,6 +192,49 @@ describe("sign-in screen", () => {
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
   };
   const submit = () => fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+
+  it("shows no interactive form while the session is still loading", async () => {
+    const auth = new FakeAuth();
+    auth.getSessionGate = deferred<void>();
+    renderApp({ auth, entry: "/sign-in" });
+    expect(screen.getByRole("status")).toHaveTextContent("Checking your session");
+    expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sign in/i })).not.toBeInTheDocument();
+    await act(async () => auth.getSessionGate?.resolve());
+    expect(await screen.findByLabelText("Email")).toBeInTheDocument();
+  });
+
+  it("does not flash the form at a user who already has a session", async () => {
+    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
+    auth.getSessionGate = deferred<void>();
+    renderApp({ auth, entry: "/sign-in" });
+    expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+    await act(async () => auth.getSessionGate?.resolve());
+    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+  });
+
+  it("explains a rate limit, distinctly from wrong credentials", async () => {
+    const auth = new FakeAuth();
+    auth.signInResult = { session: null, error: { status: 429, name: "AuthApiError", code: "over_request_rate_limit" } };
+    renderApp({ auth, entry: "/sign-in" });
+    await screen.findByLabelText("Email");
+    fill("person@example.test", "synthetic-password");
+    submit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/too many sign-in attempts/i);
+    expect(alert).not.toHaveTextContent(/check your email and password/i);
+  });
+
+  it("shows a generic failure, not silence, when sign-in returns neither a session nor an error", async () => {
+    const auth = new FakeAuth();
+    auth.signInWithPassword.mockResolvedValueOnce({ data: { session: null }, error: null });
+    renderApp({ auth, entry: "/sign-in" });
+    await screen.findByLabelText("Email");
+    fill("person@example.test", "synthetic-password");
+    submit();
+    expect(await screen.findByRole("alert")).toHaveTextContent("We could not sign you in.");
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
+  });
 
   it("has labelled email and password fields of the right types", async () => {
     renderApp({ auth: new FakeAuth(), entry: "/sign-in" });

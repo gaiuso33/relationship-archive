@@ -20,20 +20,36 @@ export interface AuthClient {
   signOut(options?: { scope?: "local" | "global" | "others" }): Promise<{ error: unknown }>;
 }
 
+/**
+ * Why we are signed out, when there is something to tell the user.
+ * - `ended`: the session ended without the user asking (expired, refresh failed, other tab).
+ * - `local_only`: the user signed out, and this device is signed out, but the service could not be
+ *   reached to end the session there.
+ */
+export type SignedOutReason = "ended" | "local_only";
+
 /** What the UI may know. Tokens are deliberately not part of this. */
 export type AuthState =
   | { status: "loading" }
-  | { status: "signedOut"; reason?: "ended" }
+  | { status: "signedOut"; reason?: SignedOutReason }
   | { status: "signedIn"; userId: string };
 
-export type SignInResult = { ok: true } | { ok: false; reason: "rejected" | "unavailable" };
+export type SignInResult = { ok: true } | { ok: false; reason: "rejected" | "rate_limited" | "unavailable" };
+
+/**
+ * - `signed_out`: signed out here and at the service.
+ * - `local_only`: signed out on this device, but ending the session at the service failed (for
+ *   example offline), so the refresh token may not have been revoked there.
+ * - `failed`: the session is still active on this device.
+ */
+export type SignOutResult = "signed_out" | "local_only" | "failed";
 
 export interface AuthContextValue {
   state: AuthState;
   /** Signs in with email and password. Never throws, and never reports which part was wrong. */
   signIn(email: string, password: string): Promise<SignInResult>;
-  /** Ends the session on this device. Resolves `false` if it could not be ended. */
-  signOut(): Promise<boolean>;
+  /** Ends the session on this device, and at the service when it can be reached. */
+  signOut(): Promise<SignOutResult>;
   /** Called when the API says the session is not valid: ends it locally. Never retries. */
   expireSession(): void;
   /** The current access token, refreshed by the SDK if needed. Only the API client should call this. */
