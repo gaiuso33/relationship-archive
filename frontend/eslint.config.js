@@ -15,6 +15,17 @@ export default defineConfig([
       reactHooks.configs.flat.recommended,
       reactRefresh.configs.vite,
     ],
+    rules: {
+      // Personal content, tokens and credentials must never reach the console.
+      "no-console": "error",
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message: "Do not render raw HTML: user text is always rendered as text.",
+        },
+      ],
+    },
     languageOptions: {
       ecmaVersion: 2023,
       globals: globals.browser,

@@ -73,13 +73,20 @@ The log event is `auth_keys_unavailable_<category>` (for example `auth_keys_unav
 
 The backend needs **no** Supabase key. Never put the service-role key, the legacy JWT secret or any other privileged value in backend configuration for this purpose, and never expose them to the frontend. The frontend's own settings arrive with #11.
 
+## The frontend side
+
+The browser signs in with Supabase Auth, keeps the session in the SDK's default browser storage
+and sends the access token as `Authorization: Bearer <token>`. How that works, how `401` and `503`
+are handled, and the storage trade-off are in [frontend-auth.md](frontend-auth.md). Frontend route
+guards are a convenience only; this backend remains the authorization boundary.
+
 ## Checking your real Supabase project
 
 Automated tests use synthetic keys and tokens only. To confirm that your real project matches what the backend expects (signing algorithm, issuer, audience, role, anonymous flag and subject format) run a local check **on your own machine**. It never prints the token or personal claims, and the token never leaves your machine.
 
 1. In the Supabase dashboard, open **Authentication → JWT signing keys** and make sure the project uses asymmetric signing keys (ES256 is recommended). A project still on the legacy secret publishes no keys and the backend will answer 503.
 2. Put your **non-production** project URL in your local, git-ignored `.env`: `SUPABASE_URL=https://<project-ref>.supabase.co`.
-3. Sign in to your own test user through your own means (for example the Supabase dashboard, or the sign-in screens when #11 exists) and copy an access token. Do not paste it into a chat, an issue, a commit or a shell command line.
+3. Sign in to your own test user through your own means (for example the Supabase dashboard, or the sign-in screen, see [frontend-auth.md](frontend-auth.md)) and copy an access token. Do not paste it into a chat, an issue, a commit or a shell command line.
 4. From `backend/`, with the virtual environment active, run:
 
    ```sh
