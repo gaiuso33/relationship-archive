@@ -14,11 +14,11 @@ issue #33.
 
 - Email and password sign-in and sign-out through Supabase Auth.
 - A session that survives a page reload and is refreshed by the Supabase SDK.
-- Private routes that send signed-out visitors to `/sign-in`.
-- A typed API client that sends the access token to the API, used so far for `GET /api/v1/me`.
+- Private routes that send signed-out visitors to `/sign-in`. There is no separate home page: `/` goes to `/people` (the temporary home page from #11 was retired in #14).
+- A typed API client that sends the access token to the API, used by the people and notes screens ([frontend-screens.md](frontend-screens.md)) and for `GET /api/v1/me`.
 
 Not implemented (separate issues): sign-up, password reset, magic links, OAuth, MFA, account
-management and the people and notes screens (#14).
+management. The people and notes screens are in [frontend-screens.md](frontend-screens.md).
 
 ## Configuration
 
@@ -157,6 +157,6 @@ still be accepted until it expires (about an hour by default). This was accepted
 ## Tests
 
 `frontend/src` (Vitest and React Testing Library, role-based queries): `config.test.ts`,
-`auth/*.test.ts(x)`, `api/client.test.ts`, `routes.test.tsx` and `bundle.test.ts`. They use a fake
+`auth/*.test.ts(x)`, `api/client.test.ts`, `routes.test.tsx` (routes, sign-out from the app layout, API failures) and `bundle.test.ts`; the screens have their own tests, listed in [frontend-screens.md](frontend-screens.md). They use a fake
 Supabase client (`src/test/fakeAuth.ts`), synthetic users and tokens, and no network. Run
 `npm run test -- --run` in `frontend/`.

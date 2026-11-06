@@ -154,7 +154,7 @@ npm run test -- --run
 npm run build
 ```
 
-`npm run build` also type-checks. The separate `typecheck` step exists so a type error is reported on its own.
+`npm run build` also type-checks. The screens and what they do are described in [frontend-screens.md](frontend-screens.md). The separate `typecheck` step exists so a type error is reported on its own.
 
 ## Security checks
 

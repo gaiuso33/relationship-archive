@@ -1,34 +1,14 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import { API_ORIGIN, renderApp, where } from "./test/renderApp";
+import { errorBody, FakeApi, TOKEN } from "./test/fakeApi";
 import { deferred, FakeAuth, sessionFor, USER_A } from "./test/fakeAuth";
 
-const API = "https://api.example.test";
-const TOKEN = "synthetic-access-token";
-
-function LocationProbe() {
-  const location = useLocation();
-  return <p data-testid="location">{`${location.pathname}${location.search}`}</p>;
-}
-
-function meResponse(status = 200, body: unknown = { user_id: USER_A }) {
-  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-}
-
-function renderApp(options: { auth: FakeAuth; entry?: string; fetchImpl?: typeof fetch }) {
-  const fetchImpl = options.fetchImpl ?? (vi.fn(async () => meResponse()) as unknown as typeof fetch);
-  render(
-    <MemoryRouter initialEntries={[options.entry ?? "/"]}>
-      <App auth={options.auth} apiBaseUrl={API} fetchImpl={fetchImpl} />
-      <LocationProbe />
-    </MemoryRouter>,
-  );
-  return fetchImpl as unknown as ReturnType<typeof vi.fn>;
-}
-
-const where = () => screen.getByTestId("location").textContent;
+const PEOPLE = /^\/api\/v1\/people$/;
+const failure = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+const peopleHeading = () => screen.findByRole("heading", { name: "People" });
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,44 +18,60 @@ describe("protected routes", () => {
   it("shows neither private content nor a redirect while the session is loading", async () => {
     const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
     auth.getSessionGate = deferred<void>();
-    renderApp({ auth });
+    const { api } = renderApp({ auth });
     expect(screen.getByRole("status")).toHaveTextContent("Checking your session");
-    expect(screen.queryByRole("heading", { name: "Relationship Archive" })).not.toBeInTheDocument();
-    expect(where()).toBe("/");
+    expect(screen.queryByRole("heading", { name: "People" })).not.toBeInTheDocument();
+    expect(where()).toBe("/people");
+    expect(api.calls).toHaveLength(0);
     await act(async () => auth.getSessionGate?.resolve());
-    expect(await screen.findByRole("heading", { name: "Relationship Archive" })).toBeInTheDocument();
+    expect(await peopleHeading()).toBeInTheDocument();
   });
 
-  it("redirects a signed-out visitor to sign-in, remembering the intended page", async () => {
-    renderApp({ auth: new FakeAuth(), entry: "/?tab=notes" });
+  it("redirects a signed-out visitor to sign-in, remembering the intended page, without calling the API", async () => {
+    const { api } = renderApp({ auth: new FakeAuth(), entry: "/people?tab=notes" });
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(where()).toBe("/sign-in?next=%2F%3Ftab%3Dnotes");
+    expect(where()).toBe("/sign-in?next=%2Fpeople%3Ftab%3Dnotes");
+    expect(api.calls).toHaveLength(0);
   });
 
-  it("lets a signed-in user reach a private route and verifies the session with the API", async () => {
-    const fetchImpl = renderApp({ auth: new FakeAuth(sessionFor(USER_A, TOKEN)) });
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
-    const [url, init] = fetchImpl.mock.calls[0] as [URL, RequestInit];
-    expect(url.href).toBe(`${API}/api/v1/me`);
-    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+  it("redirects / to /people", async () => {
+    renderApp({ entry: "/" });
+    expect(await peopleHeading()).toBeInTheDocument();
+    expect(where()).toBe("/people");
+  });
+
+  it("retires the old home page: nothing says 'You are signed in.' and /me is not called", async () => {
+    const { api } = renderApp({ entry: "/" });
+    await peopleHeading();
+    expect(screen.queryByText("You are signed in.")).not.toBeInTheDocument();
+    expect(api.calls.some((c) => c.path === "/api/v1/me")).toBe(false);
+  });
+
+  it("lets a signed-in user reach a private route, sending the bearer token to the API origin only", async () => {
+    const { api } = renderApp();
+    await peopleHeading();
+    await screen.findByText("You have not added anyone yet.");
+    expect(api.calls[0]).toMatchObject({ method: "GET", path: "/api/v1/people", authorization: `Bearer ${TOKEN}` });
     expect(document.body.textContent).not.toContain(TOKEN);
+    expect(API_ORIGIN).toBe("https://api.example.test");
   });
 
   it("sends a signed-in user away from the sign-in page", async () => {
-    renderApp({ auth: new FakeAuth(sessionFor(USER_A, TOKEN)), entry: "/sign-in" });
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
-    expect(where()).toBe("/");
+    renderApp({ entry: "/sign-in" });
+    expect(await peopleHeading()).toBeInTheDocument();
+    expect(where()).toBe("/people");
   });
 
   it("shows a page-not-found screen for unknown routes, without needing a session", async () => {
     renderApp({ auth: new FakeAuth(), entry: "/nowhere" });
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
   });
+});
 
-  it("signs out from the home page and returns to sign-in", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    renderApp({ auth });
-    await screen.findByText("You are signed in.");
+describe("sign-out from the app layout", () => {
+  it("signs out and returns to sign-in", async () => {
+    const { auth } = renderApp();
+    await peopleHeading();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(auth.signOut).toHaveBeenCalledWith({ scope: "local" });
@@ -85,7 +81,7 @@ describe("protected routes", () => {
     const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
     auth.signOutMode = "network";
     renderApp({ auth });
-    await screen.findByText("You are signed in.");
+    await peopleHeading();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(await screen.findByText(/signed out on this device, but we could not reach the service/i)).toBeInTheDocument();
@@ -97,92 +93,93 @@ describe("protected routes", () => {
     const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
     auth.signOutMode = "stuck";
     renderApp({ auth });
-    await screen.findByText("You are signed in.");
+    await peopleHeading();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByText(/could not sign you out/i)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Relationship Archive" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "People" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+  });
+
+  it("ends the session when another tab signs out", async () => {
+    const { auth } = renderApp();
+    await peopleHeading();
+    act(() => auth.emit("SIGNED_OUT", null));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Your session has ended");
   });
 });
 
-describe("home page and API failures", () => {
-  it("on 401 ends the session and explains why on the sign-in page", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    const fetchImpl = vi.fn(async () => meResponse(401, { error: { code: "unauthorized", message: "x" } }));
-    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
+describe("API failures on a private screen", () => {
+  it("on 401 ends the session and explains why on the sign-in page, with no retry loop", async () => {
+    const api = new FakeApi();
+    api.failAlways("GET", PEOPLE, () => failure(401, errorBody("unauthorized")));
+    const { auth } = renderApp({ api });
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Your session has ended");
     expect(auth.signOut).toHaveBeenCalledTimes(1);
-    expect(fetchImpl).toHaveBeenCalledTimes(1); // no retry loop
+    expect(api.callsTo("GET", PEOPLE)).toHaveLength(1);
   });
 
   it("a 401 for a token that was refreshed meanwhile does not sign out the newer session", async () => {
-    // The reproduced race: the request goes out with the old token, the SDK refreshes the
-    // session, then the API answers 401 for the old token.
+    // The request goes out with the old token, the SDK refreshes the session, then the API
+    // answers 401 for the old token.
     const auth = new FakeAuth(sessionFor(USER_A, "old-token"));
-    const gate = deferred<Response>();
-    let calls = 0;
-    const fetchImpl = vi.fn(() => (++calls === 1 ? gate.promise : Promise.resolve(meResponse())));
-    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    const api = new FakeApi();
+    const gate = api.holdNext("GET", PEOPLE);
+    renderApp({ auth, api });
+    await vi.waitFor(() => expect(api.callsTo("GET", PEOPLE)).toHaveLength(1));
     act(() => {
-      auth.session = sessionFor(USER_A, "new-token");
+      auth.session = sessionFor(USER_A, TOKEN);
       auth.emit("TOKEN_REFRESHED", auth.session);
     });
-    await act(async () => gate.resolve(meResponse(401, { error: { code: "unauthorized", message: "x" } })));
+    await act(async () => gate.resolve(failure(401, errorBody("unauthorized"))));
 
     expect(await screen.findByText(/session was just refreshed/i)).toBeInTheDocument();
     expect(auth.signOut).not.toHaveBeenCalled();
     expect(auth.session).not.toBeNull();
     expect(screen.queryByRole("heading", { name: "Sign in" })).not.toBeInTheDocument();
-    expect(fetchImpl).toHaveBeenCalledTimes(1); // nothing retried by itself
+    expect(api.callsTo("GET", PEOPLE)).toHaveLength(1); // nothing retried by itself
 
     // The user may try again, and now the new token is used.
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
-    const [, init] = fetchImpl.mock.calls[1] as unknown as [URL, RequestInit];
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer new-token");
+    expect(await screen.findByText("You have not added anyone yet.")).toBeInTheDocument();
+    expect(api.callsTo("GET", PEOPLE)[1].authorization).toBe(`Bearer ${TOKEN}`);
   });
 
   it("on 503 shows a safe message, offers a retry and keeps the session", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    let calls = 0;
-    const fetchImpl = vi.fn(async () =>
-      ++calls === 1 ? meResponse(503, { error: { code: "service_unavailable", request_id: "req-9" } }) : meResponse(),
-    );
-    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const api = new FakeApi();
+    api.failNext("GET", PEOPLE, () => failure(503, errorBody("service_unavailable", { request_id: "req-9" })));
+    const { auth } = renderApp({ api });
     expect(await screen.findByText(/temporarily unavailable/i)).toBeInTheDocument();
     expect(screen.getByText("Reference: req-9")).toBeInTheDocument();
     expect(auth.signOut).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+    expect(await screen.findByText("You have not added anyone yet.")).toBeInTheDocument();
   });
 
   it("on a network failure shows a connectivity message and keeps the session", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    const fetchImpl = vi.fn(async () => {
-      throw new TypeError("Failed to fetch");
-    });
-    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const api = new FakeApi();
+    const real = api.fetch;
+    let first = true;
+    api.fetch = (async (...args: Parameters<typeof fetch>) => {
+      if (first) {
+        first = false;
+        throw new TypeError("Failed to fetch");
+      }
+      return real(...args);
+    }) as typeof fetch;
+    const { auth } = renderApp({ api });
     expect(await screen.findByText(/could not reach the service/i)).toBeInTheDocument();
     expect(auth.signOut).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 
   it("does not show response bodies", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    const fetchImpl = vi.fn(async () => meResponse(500, { error: { message: "LEAKED-DETAIL" }, detail: "LEAKED-DETAIL" }));
-    renderApp({ auth, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const api = new FakeApi();
+    api.failAlways("GET", PEOPLE, () => failure(500, { error: { message: "LEAKED-DETAIL" }, detail: "LEAKED-DETAIL" }));
+    renderApp({ api });
     expect(await screen.findByText(/went wrong on our side/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("LEAKED-DETAIL");
-  });
-
-  it("ends the session when another tab signs out", async () => {
-    const auth = new FakeAuth(sessionFor(USER_A, TOKEN));
-    renderApp({ auth });
-    await screen.findByText("You are signed in.");
-    act(() => auth.emit("SIGNED_OUT", null));
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Your session has ended");
   });
 });
 
@@ -210,7 +207,7 @@ describe("sign-in screen", () => {
     renderApp({ auth, entry: "/sign-in" });
     expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
     await act(async () => auth.getSessionGate?.resolve());
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
   });
 
   it("explains a rate limit, distinctly from wrong credentials", async () => {
@@ -273,19 +270,19 @@ describe("sign-in screen", () => {
     fireEvent.submit(button.closest("form") as HTMLFormElement);
     expect(auth.signInWithPassword).toHaveBeenCalledTimes(1);
     await act(async () => auth.signInGate?.resolve());
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
   });
 
   it("signs in with a trimmed email and goes to the remembered page", async () => {
     const auth = new FakeAuth();
     auth.signInResult = { session: sessionFor(USER_A, TOKEN), error: null };
-    renderApp({ auth, entry: "/sign-in?next=%2F" });
+    renderApp({ auth, entry: "/sign-in?next=%2Fpeople%2Fnew" });
     await screen.findByLabelText("Email");
     fill("  person@example.test  ", "synthetic-password");
     submit();
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Add person" })).toBeInTheDocument();
     expect(auth.signInWithPassword).toHaveBeenCalledWith({ email: "person@example.test", password: "synthetic-password" });
-    expect(where()).toBe("/");
+    expect(where()).toBe("/people/new");
   });
 
   it("gives one generic message for every rejected sign-in, and clears the password", async () => {
@@ -324,8 +321,8 @@ describe("sign-in screen", () => {
     await screen.findByLabelText("Email");
     fill("person@example.test", "synthetic-password");
     submit();
-    expect(await screen.findByText("You are signed in.")).toBeInTheDocument();
-    expect(where()).toBe("/");
+    expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
+    expect(where()).toBe("/people");
   });
 
   it("never shows the password or token, and writes nothing to the console or browser storage", async () => {
@@ -336,13 +333,13 @@ describe("sign-in screen", () => {
     await screen.findByLabelText("Email");
     fill("person@example.test", "synthetic-password");
     submit();
-    await screen.findByText("You are signed in.");
+    await screen.findByRole("heading", { name: "People" });
     expect(document.body.textContent).not.toContain("synthetic-password");
     expect(document.body.textContent).not.toContain(TOKEN);
     expect(window.location.href).not.toContain(TOKEN);
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
-    await waitFor(() => expect(where()).toBe("/"));
+    await waitFor(() => expect(where()).toBe("/people"));
   });
 });

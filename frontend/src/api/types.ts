@@ -24,3 +24,33 @@ export interface ApiFieldError {
 }
 
 export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+
+/** A person, as the API returns it. `timezone` is read but this application never sets it. */
+export interface Person {
+  id: string;
+  display_name: string;
+  birthday: string | null;
+  timezone: string | null;
+  interests: string[];
+  preferences: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** What the person form may send. There is deliberately no `timezone`: the form never changes it. */
+export interface PersonInput {
+  display_name: string;
+  birthday: string | null;
+  interests: string[];
+  preferences: string[];
+}
+
+export type PersonChanges = Partial<PersonInput>;
+
+export interface Note {
+  id: string;
+  person_id: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
