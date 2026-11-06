@@ -13,3 +13,14 @@ export type ApiErrorKind =
   | "server" // other 5xx
   | "unexpected" // a response we cannot interpret
   | "aborted"; // cancelled by the caller
+
+/**
+ * One problem the API reported about a request field: where it is and what kind of problem it is.
+ * The API never sends the submitted value, and the client keeps only short, well-formed entries.
+ */
+export interface ApiFieldError {
+  loc: (string | number)[];
+  type: string;
+}
+
+export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
