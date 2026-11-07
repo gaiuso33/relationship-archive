@@ -14,11 +14,11 @@ issue #33.
 
 - Email and password sign-in and sign-out through Supabase Auth.
 - A session that survives a page reload and is refreshed by the Supabase SDK.
-- Private routes that send signed-out visitors to `/sign-in`.
-- A typed API client that sends the access token to the API, used so far for `GET /api/v1/me`.
+- Private routes that send signed-out visitors to `/sign-in`. There is no separate home page: `/` goes to `/people` (the temporary home page from #11 was retired in #14).
+- A typed API client that sends the access token to the API, used by the people and notes screens ([frontend-screens.md](frontend-screens.md)) and for `GET /api/v1/me`.
 
 Not implemented (separate issues): sign-up, password reset, magic links, OAuth, MFA, account
-management and the people and notes screens (#14).
+management. The people and notes screens are in [frontend-screens.md](frontend-screens.md).
 
 ## Configuration
 
@@ -101,9 +101,24 @@ only, with no cookies, no caching and no redirects. A path is checked before the
 read: every segment must start with a letter, digit, `_`, `~` or `-`, so `.` and `..` segments are
 refused, and `%` is not accepted at all, so no encoded dot segment (`%2e%2e`, `%252e`) or slash
 gets through. Backslashes, queries, fragments, empty segments and trailing slashes are refused too,
-and the URL that is built must equal the checked path exactly. A refused path never reaches the
-token provider or `fetch`. The token never goes in a URL, a query string, a log
+and the URL that is built must equal the checked path (and query) exactly. A refused request never
+reaches the token provider or `fetch`. The token never goes in a URL, a query string, a log
 or an error. Requests can be cancelled with an `AbortSignal`.
+
+**Methods, bodies and queries (added for the people and notes screens).** `request({method, path,
+query, body, signal})` accepts only `GET`, `POST`, `PATCH` and `DELETE`; anything else is refused.
+A `body` is sent as JSON (with `Content-Type: application/json`) and is allowed only on `POST` and
+`PATCH`; a body that cannot be serialised, or is over 256 KiB, is refused. `query` is separate from
+the path so it cannot change it: names must be lower-case words (`limit`, `offset`) and values
+non-negative whole numbers, at most eight of them; anything else is refused. A `204 No Content`
+answer returns `undefined`. These checks run for every method, and the rules below (stale-token
+`401`, no retries) apply to writes exactly as to reads. A write that fails with a network error is
+reported once and never resent automatically, because the server may already have applied it.
+
+A `422` carries the API's `fields` (where the problem is and its type, never the submitted value).
+The client keeps only short, well-formed entries (at most 50, each location at most six parts of
+plain names or small whole numbers, each type a short lower-case word), as `ApiError.fields`, so a
+form can mark the right input. Anything else in the body is discarded.
 
 | Outcome | Behaviour |
 |---|---|
@@ -142,6 +157,6 @@ still be accepted until it expires (about an hour by default). This was accepted
 ## Tests
 
 `frontend/src` (Vitest and React Testing Library, role-based queries): `config.test.ts`,
-`auth/*.test.ts(x)`, `api/client.test.ts`, `routes.test.tsx` and `bundle.test.ts`. They use a fake
+`auth/*.test.ts(x)`, `api/client.test.ts`, `routes.test.tsx` (routes, sign-out from the app layout, API failures) and `bundle.test.ts`; the screens have their own tests, listed in [frontend-screens.md](frontend-screens.md). They use a fake
 Supabase client (`src/test/fakeAuth.ts`), synthetic users and tokens, and no network. Run
 `npm run test -- --run` in `frontend/`.

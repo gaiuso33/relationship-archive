@@ -172,7 +172,7 @@ All inputs and outputs must be validated. Responses must avoid exposing database
 
 Supabase Auth will handle user identity and sign-in.
 
-The frontend obtains an access token through the Supabase SDK and sends it to the backend using the standard Bearer authorization header over HTTPS. Sign-in, the session and the API client are described in [frontend-auth.md](frontend-auth.md). The SDK keeps the session in browser storage, an accepted trade-off recorded there; the production API origin, CORS allow-list and security headers are decided with hosting (#33).
+The frontend obtains an access token through the Supabase SDK and sends it to the backend using the standard Bearer authorization header over HTTPS. Sign-in, the session and the API client are described in [frontend-auth.md](frontend-auth.md); the people and notes screens are in [frontend-screens.md](frontend-screens.md). The SDK keeps the session in browser storage, an accepted trade-off recorded there; the production API origin, CORS allow-list and security headers are decided with hosting (#33).
 
 The backend must:
 

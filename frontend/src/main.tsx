@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 
+import "./styles.css";
 import App from "./App";
 import { createAuthClient } from "./auth/supabase";
 import { ConfigError, loadConfig } from "./config";
