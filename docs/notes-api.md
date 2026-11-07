@@ -113,7 +113,8 @@ CASCADE`). Notes about the caller's other people, and other users' notes, are no
 - Tests check these with distinctive synthetic note text, in both log formats, including a forced
   database error.
 - Successful responses are not cacheable (`Cache-Control: no-store`).
-- Notes are not sent to any external service. There is no search, AI extraction or provenance in
+- Notes are not sent to any external service. Notes are not searched (search covers person names only, see
+  [people-api.md](people-api.md#searching-by-name)), and there is no AI extraction or provenance in
   this API; those are later issues.
 
 ## Storage
