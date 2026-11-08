@@ -94,6 +94,7 @@ To create a migration after changing models, run `alembic revision --autogenerat
 - `app/db/session.py` creates one engine per process from `DATABASE_URL` and provides `get_session`, a FastAPI dependency that gives each request its own session and closes it afterwards.
 - Sessions do not commit automatically. Code that changes data calls `session.commit()` explicitly; uncommitted work is rolled back.
 - Errors never include SQL parameters, and settings hide the connection URL, so credentials and note contents stay out of logs.
+- Search by name follows the database's locale and collation. `python -m app.tools.db_collation` (run from `backend/`) reports what your database uses without changing anything; CI records the same in each backend job's summary. See [database-collation-checklist.md](database-collation-checklist.md).
 - The session time zone is not set yet. Time zone handling is decided in #18, and connection pooling for production in #33.
 
 ## 4. Backend (FastAPI)
