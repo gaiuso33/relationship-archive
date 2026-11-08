@@ -31,6 +31,7 @@ from app.main import API_V1_PREFIX, create_app
 from app.models.note import Note
 from app.services import notes as notes_service
 from tests import auth_support as a
+from tests.support import assert_identifier_not_reflected
 
 PEOPLE = f"{API_V1_PREFIX}/people"
 USER_A = a.USER_ID
@@ -946,32 +947,61 @@ def test_edit_accepts_the_same_limits(client: TestClient, as_a: dict) -> None:
     assert len(response.json()["content"]) == 10_000
 
 
+def malformed_identifier_responses(client: TestClient, headers: dict, bad_id: str) -> list:
+    """One request per route that takes a person or note identifier, with its expected `loc`."""
+    person = make_person(client, headers)
+    note = make_note(client, headers, person)
+    return [
+        (client.get(notes_url(bad_id), headers=headers), ["path", "person_id"]),
+        (
+            client.post(notes_url(bad_id), json={"content": "x"}, headers=headers),
+            ["path", "person_id"],
+        ),
+        (
+            client.patch(note_url(bad_id, note["id"]), json={"content": "x"}, headers=headers),
+            ["path", "person_id"],
+        ),
+        (
+            client.patch(note_url(person, bad_id), json={"content": "x"}, headers=headers),
+            ["path", "note_id"],
+        ),
+        (client.delete(note_url(person, bad_id), headers=headers), ["path", "note_id"]),
+    ]
+
+
 @pytest.mark.parametrize("bad_id", ["not-a-uuid", "123", "00000000-0000-0000-0000-00000000000g"])
 def test_a_malformed_identifier_is_a_validation_error(
     client: TestClient, as_a: dict, bad_id: str
 ) -> None:
-    person = make_person(client, as_a)
-    note = make_note(client, as_a, person)
-    responses = [
-        (client.get(notes_url(bad_id), headers=as_a), ["path", "person_id"]),
-        (
-            client.post(notes_url(bad_id), json={"content": "x"}, headers=as_a),
-            ["path", "person_id"],
-        ),
-        (
-            client.patch(note_url(bad_id, note["id"]), json={"content": "x"}, headers=as_a),
-            ["path", "person_id"],
-        ),
-        (
-            client.patch(note_url(person, bad_id), json={"content": "x"}, headers=as_a),
-            ["path", "note_id"],
-        ),
-        (client.delete(note_url(person, bad_id), headers=as_a), ["path", "note_id"]),
-    ]
-    for response, loc in responses:
+    for response, loc in malformed_identifier_responses(client, as_a, bad_id):
         error = assert_error(response, 422, "validation_error")
         assert error["fields"][0]["loc"] == loc
-        assert bad_id not in response.text
+        assert_identifier_not_reflected(error, bad_id)
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "123" + "a" * 29,
+        "b" * 14 + "123" + "c" * 15,
+        "d" * 29 + "123",
+    ],
+    ids=["id-starts-with-123", "id-contains-123", "id-ends-with-123"],
+)
+def test_a_request_id_that_contains_the_identifier_is_not_a_reflection(
+    client: TestClient, as_a: dict, pin_request_id, request_id: str
+) -> None:
+    """Regression test for #73: the check once failed whenever the random request id held "123"."""
+    pin_request_id(request_id)
+
+    for response, loc in malformed_identifier_responses(client, as_a, "123"):
+        error = assert_error(response, 422, "validation_error")
+        assert error["request_id"] == request_id
+        assert "123" in error["request_id"]
+        assert error["message"] == "Some fields are missing or invalid."
+        assert [field["loc"] for field in error["fields"]] == [loc]
+        assert set(error["fields"][0]) == {"loc", "type"}
+        assert_identifier_not_reflected(error, "123")
 
 
 def test_missing_people_and_notes_are_not_found(client: TestClient, as_a: dict) -> None:
