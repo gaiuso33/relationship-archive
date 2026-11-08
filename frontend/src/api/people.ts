@@ -47,11 +47,23 @@ export function parsePerson(value: unknown): Person {
   throw new ApiError("unexpected");
 }
 
-export async function listPeople(api: ApiClient, signal?: AbortSignal): Promise<Person[]> {
-  const body = await api.request({ method: "GET", path: "/api/v1/people", signal });
+function parsePeople(body: unknown): Person[] {
   const items = typeof body === "object" && body !== null ? (body as { items?: unknown }).items : undefined;
   if (!Array.isArray(items)) throw new ApiError("unexpected");
   return items.map(parsePerson);
+}
+
+export async function listPeople(api: ApiClient, signal?: AbortSignal): Promise<Person[]> {
+  return parsePeople(await api.request({ method: "GET", path: "/api/v1/people", signal }));
+}
+
+/**
+ * People whose name contains `query` (names only), in the same order as the list. The text is a
+ * person's name, so it goes in the request body: it is never put in a URL, where it could end up
+ * in logs, history or referrers.
+ */
+export async function searchPeople(api: ApiClient, query: string, signal?: AbortSignal): Promise<Person[]> {
+  return parsePeople(await api.request({ method: "POST", path: "/api/v1/people/search", body: { query }, signal }));
 }
 
 export async function getPerson(api: ApiClient, personId: string, signal?: AbortSignal): Promise<Person> {

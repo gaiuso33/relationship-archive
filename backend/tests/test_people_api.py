@@ -122,6 +122,7 @@ def test_the_expected_routes_exist(app: FastAPI) -> None:
         ("PATCH", f"{PEOPLE}/{{person_id}}"),
         ("PATCH", f"{notes}/{{note_id}}"),
         ("POST", PEOPLE),
+        ("POST", f"{PEOPLE}/search"),
         ("POST", notes),
     ]
 
@@ -526,6 +527,7 @@ def test_service_functions_always_require_the_owner() -> None:
     ]
     assert {f.__name__ for f in functions} == {
         "list_people",
+        "search_people",
         "get_person",
         "create_person",
         "update_person",

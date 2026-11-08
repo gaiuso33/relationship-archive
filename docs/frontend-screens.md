@@ -32,6 +32,16 @@ matching the API's 404.
 
 - **List.** Loading, error (with "Try again"), empty ("You have not added anyone yet.") and list
   states. People appear in the order the API returns them. Birthdays are shown as calendar dates.
+- **Search.** A "Search by name" box above the list (`pages/PeopleListPage.tsx`), submitted with
+  Enter or the Search button, so nothing is sent while typing. It calls
+  `POST /api/v1/people/search` ([people-api.md](people-api.md#searching-by-name)) and searches
+  **names only**, which the screen says in its no-results message. The text is trimmed and checked
+  first (1 to 120 characters, no control characters; `people/validation.ts`). Searching shows
+  "Searching…", then "N people match “text”." in a status region, or "No one matches “text”." with
+  the Clear button. **Clear** returns to the full list, empties the box and puts focus back in it.
+  Errors use the same fixed messages with "Try again"; a `422` says the text cannot be searched
+  for, without a retry. Every submission starts a new request and cancels the one still running,
+  so an older answer cannot replace a newer one.
 - **Form.** Name, optional birthday, and interests and preferences as add/remove lists. Checks run
   before any request and mirror the API's rules (`people/validation.ts`): name 1–120 characters,
   birthday between 1900-01-01 and today, up to 50 entries of 1–100 characters, no repeats ignoring
@@ -62,6 +72,11 @@ put in history. The key is removed once shown.
 
 ## Privacy
 
+- **The search text** is kept only in the component's state: not in the URL (the page stays at
+  `/people`), not in the history, `localStorage`, `sessionStorage` or cookies, not in the page
+  title and not in the console, and it is forgotten when the person leaves the screen. On the
+  wire it is only in the body of the `POST`. It is shown back as plain text. The cost is that going
+  to a person and back starts from the full list.
 - Note text and people's details live only in component state. Nothing is written to
   `localStorage`, `sessionStorage` or cookies by these screens, and an unsent draft is discarded
   when the person leaves the screen or the session ends.
@@ -114,12 +129,13 @@ than a defect but could be tidied later.
 - The client accepts a few characters the API rejects (for example a zero-width joiner or a
   non-breaking space, which the API's printable-character rule refuses). They come back as a field
   error from the API rather than being caught earlier.
-- No search, no birthday views, no reminders, no export, and no AI features (later milestones).
+- Search covers names only (owner decision; see the PRD). Whether a name matches regardless of case depends on the database's collation: see [people-api.md](people-api.md#searching-by-name).
+- No birthday views, no reminders, no export, and no AI features (later milestones).
 - Not tested with a real Supabase project or backend, or in production hosting.
 
 ## Tests
 
-`pages/screens.test.tsx` (list, form, edit, detail, delete, notes, pagination), `journey.test.tsx`
+`pages/screens.test.tsx` (list, form, edit, detail, delete, notes, pagination), `pages/search.test.tsx` (search states, validation, errors, overlapping searches, privacy of the text), `journey.test.tsx`
 (sign in → add a person → add a note → see it, and the privacy checks), `components/*.test.tsx`,
 `people/validation.test.ts`, `notes/validation.test.ts`, `format.test.ts`, `api/people.test.ts`
 (helpers) and `routes.test.tsx` (routes, sign-out, API failures). `src/test/fakeApi.ts` is a small

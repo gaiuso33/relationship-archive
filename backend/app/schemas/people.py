@@ -149,4 +149,22 @@ class PersonList(BaseModel):
     items: list[PersonResponse]
 
 
+class PersonSearch(BaseModel):
+    """A search by person name (issue #15). The text is sent in the body, never in the URL.
+
+    The text is trimmed and must be 1 to 120 printable characters, the same rules as a name, so
+    a query can never contain something a name cannot. It is matched literally (see
+    `app.services.people.search_people`); the stored name is never changed by a search.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+
+    @field_validator("query")
+    @classmethod
+    def _query(cls, value: str) -> str:
+        return _clean_text(value, max_length=DISPLAY_NAME_MAX_LENGTH)
+
+
 PersonId = Annotated[uuid.UUID, Field(description="The person's identifier.")]

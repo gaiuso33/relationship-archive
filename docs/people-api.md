@@ -14,11 +14,12 @@ data. Errors use the standard format in [logging-and-errors.md](logging-and-erro
 |---|---|---|
 | `GET /people` | 200 `{"items": [Person, ...]}` | List the caller's people, ordered by name (case-insensitive), then id. |
 | `POST /people` | 201 `Person` | Create a person. |
+| `POST /people/search` | 200 `{"items": [Person, ...]}` | Search the caller's people by name ([below](#searching-by-name)). |
 | `GET /people/{person_id}` | 200 `Person` | Retrieve one of the caller's people. |
 | `PATCH /people/{person_id}` | 200 `Person` | Change some fields of one of the caller's people. |
 | `DELETE /people/{person_id}` | 204, no body | Delete one of the caller's people, **and all their notes**. |
 
-Other statuses: `401` (missing or bad token), `404 not_found` (no such person *for this user*),
+Other statuses: `401` (missing or bad token), `404 not_found` (no such person *for this user*; not used by search),
 `422 validation_error` (invalid input, including a malformed `person_id`), `503` (token
 verification unavailable). There is no list pagination yet: the archive is a single user's
 personal list.
@@ -46,6 +47,64 @@ values are out of scope and will be stored separately (ADR-003).
 `birthday` and `timezone` can be `null` to clear them.
 
 Requests reject unknown fields. The owner is never part of a request or a response.
+
+## Searching by name
+
+`POST /api/v1/people/search` with the body `{"query": "..."}` returns the caller's people whose
+**name** contains the text, in the same shape and order as the list (case-insensitive name, then
+id). It changes nothing. It is a `POST` so the text, which is part of a person's name, travels in
+the body and never in a URL, where hosting and proxy logs, browser history and referrers can
+record it. (The application's own logs record neither query strings nor bodies.)
+
+**Names only.** Notes, interests, preferences, birthdays, time zones and identifiers are never
+searched. This is the owner's decision of 2026-10-31 recorded in the product requirements
+(section 5.2 and journey J7): searching for "hiking" returns nobody whose only "hiking" is in a
+note, interest or preference. Tests check this.
+
+**Matching rules**
+
+- The text is trimmed, then must be 1 to 120 characters (code points) with no control characters:
+  the same rules as a name, so a blank text, a control character or an invisible separator such
+  as a zero-width joiner, a no-break space or a byte-order mark is a `422`.
+- The whole phrase is matched as one piece of literal text anywhere in the name. It is not split
+  into words, so "Friend Sample" does not match "Sample Friend".
+- Case does not matter (see the limits below). Accents, spelling variants and typos do matter:
+  there is no accent folding, no Unicode normalisation, no fuzzy matching and no ranking.
+- `%`, `_`, `\` and `/` match themselves. The statement is
+  `display_name ILIKE '%' || :text || '%' ESCAPE '/'` with the text as a bound parameter in which
+  `%`, `_` and `/` are escaped; it is never part of the SQL text. Injection-style text is just
+  text that matches nothing (or a name that really contains it).
+- There is no pagination, like the list. A search that matches nobody is `200` with
+  `{"items": []}`, not an error.
+
+**Case-insensitivity depends on the database's collation.** It is PostgreSQL's `ILIKE`, which
+follows the database's locale settings, so this is not universal Unicode case folding. Checked on
+PostgreSQL 17.10 (one-off, by hand; CI runs only the `postgres:17` image's default,
+`en_US.UTF-8`) against five databases:
+
+| Behaviour | libc `en_US.UTF-8`, libc `C.UTF-8`, builtin `C.UTF-8` | ICU `en-US` | `C` locale |
+|---|---|---|---|
+| ASCII (`ADA` finds `Ada`) | folds | folds | folds |
+| Accented Latin (`élodie` finds `Élodie`), Greek, Cyrillic, Armenian, Vietnamese, full-width Latin | folds | folds | **does not fold** |
+| Dotted capital `İ` found by plain `i` | matches | does not match | does not match |
+| Greek final sigma `ς` found by `Σ` | does not match | matches | does not match |
+| `ß` found by `SS` | never | never | never |
+| `ß` in the name found by a capital `ẞ` | matches | matches | does not match |
+| `é` as one character vs `e` plus a combining accent | never equal | never equal | never equal |
+
+The last row is the practical one: text typed or pasted in a different Unicode form from the
+stored name will not match. Scripts without case (such as Chinese) match exactly. The production
+database's collation is not known yet (hosting is open under #33); check it there with
+`select datlocprovider, datcollate, datctype from pg_database where datname = current_database()`
+before relying on non-ASCII folding.
+
+**Tests** (`backend/tests/test_people_search_api.py`) cover the J7 example, another user's
+people (never returned, including with an identical name and at the service layer), names-only,
+wildcards and escape characters, injection-style input, validation without echoing the text,
+authentication before anything else, and the absence of the text and of any person details from
+logs and error bodies. The non-ASCII tests compare the search with the database's own `lower()`
+instead of fixed expectations, so they pass on every collation above (the whole file was run
+against all five databases).
 
 ## Ownership and how other users' records are reported
 

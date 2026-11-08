@@ -26,6 +26,28 @@ def list_people(session: Session, owner_id: uuid.UUID) -> Sequence[Person]:
     return session.scalars(statement).all()
 
 
+def search_people(session: Session, owner_id: uuid.UUID, query: str) -> Sequence[Person]:
+    """The owner's people whose name contains `query`, in the same order as `list_people`.
+
+    Names only: notes, interests and preferences are never searched (product requirements,
+    section 5.2). `query` is a bound parameter, never part of the SQL text, and is escaped
+    (`autoescape`) so that `%`, `_` and `/` in it match themselves instead of acting as LIKE
+    wildcards or the escape character. The statement is `name ILIKE '%' || :query || '%'
+    ESCAPE '/'`, so a backslash is an ordinary character.
+
+    Case-insensitivity is PostgreSQL's `ILIKE`, which follows the database's character-class
+    settings (`LC_CTYPE`, or the ICU locale). In a `C` database only ASCII letters fold; in
+    others most scripts fold, with differences for some letters (docs/people-api.md). There is
+    no accent folding and no Unicode normalisation. The owner filter is in the same statement.
+    """
+    statement = (
+        select(Person)
+        .where(Person.owner_id == owner_id, Person.display_name.icontains(query, autoescape=True))
+        .order_by(func.lower(Person.display_name), Person.id)
+    )
+    return session.scalars(statement).all()
+
+
 def get_person(session: Session, owner_id: uuid.UUID, person_id: uuid.UUID) -> Person | None:
     statement = select(Person).where(Person.id == person_id, Person.owner_id == owner_id)
     return session.scalars(statement).one_or_none()

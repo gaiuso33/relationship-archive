@@ -15,7 +15,14 @@ from app.api.deps import CurrentUser, require_user
 from app.core.errors import AppError, ErrorCode, ErrorResponse
 from app.db.session import get_session
 from app.models.person import Person
-from app.schemas.people import PersonCreate, PersonId, PersonList, PersonResponse, PersonUpdate
+from app.schemas.people import (
+    PersonCreate,
+    PersonId,
+    PersonList,
+    PersonResponse,
+    PersonSearch,
+    PersonUpdate,
+)
 from app.services import people as people_service
 
 
@@ -55,6 +62,15 @@ def list_people(user: CurrentUser, session: SessionDep) -> PersonList:
 def create_person(data: PersonCreate, user: CurrentUser, session: SessionDep) -> PersonResponse:
     person = people_service.create_person(session, user.user_id, data)
     return PersonResponse.model_validate(person)
+
+
+# Declared before `/{person_id}` so the fixed path is never read as an identifier. The search
+# text travels in the request body, not the URL, so it cannot end up in URL logs, browser
+# history or referrers. Nothing here logs it (the access log records only the route template).
+@router.post("/search", summary="Search my people by name")
+def search_people(data: PersonSearch, user: CurrentUser, session: SessionDep) -> PersonList:
+    people = people_service.search_people(session, user.user_id, data.query)
+    return PersonList(items=[PersonResponse.model_validate(p) for p in people])
 
 
 @router.get("/{person_id}", summary="Get one of my people", responses=_NOT_FOUND)
