@@ -57,6 +57,17 @@ export function checkEntry(raw: string, existing: readonly string[]): Checked<st
   return { ok: true, value };
 }
 
+/** What can be searched for. The API applies the same rules (docs/people-api.md#searching-by-name). */
+export function checkSearchQuery(raw: string): Checked<string> {
+  const value = raw.trim();
+  if (value === "") return { ok: false, error: "Enter part of a name to search for." };
+  if (countCharacters(value) > DISPLAY_NAME_MAX) {
+    return { ok: false, error: `Use ${DISPLAY_NAME_MAX} characters or fewer.` };
+  }
+  if (CONTROL_OR_SEPARATOR.test(value)) return { ok: false, error: "The search contains characters that are not allowed." };
+  return { ok: true, value };
+}
+
 export interface PersonFormValues {
   displayName: string;
   birthday: string;

@@ -200,6 +200,7 @@ legend {
 }
 
 input[type="text"],
+input[type="search"],
 input[type="date"],
 input[type="email"],
 input[type="password"],
@@ -217,6 +218,22 @@ textarea {
 
 textarea {
   resize: vertical;
+}
+
+/* The page has its own Clear button, so the browser's built-in one is hidden. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.search {
+  margin: 0 0 1rem;
+}
+
+/* Long names and searched-for text must wrap instead of widening the page. */
+.list li,
+main p {
+  overflow-wrap: anywhere;
 }
 
 [aria-invalid="true"] {

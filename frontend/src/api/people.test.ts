@@ -3,7 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import { FakeApi, TOKEN } from "../test/fakeApi";
 import { ApiError, createApiClient, type ApiClient, type JsonRequest } from "./client";
 import { createNote, listNotes, NOTES_PAGE_SIZE, parseNote } from "./notes";
-import { createPerson, deletePerson, getPerson, isUuid, listPeople, parsePerson, personPath, updatePerson } from "./people";
+import {
+  createPerson,
+  deletePerson,
+  getPerson,
+  isUuid,
+  listPeople,
+  parsePerson,
+  personPath,
+  searchPeople,
+  updatePerson,
+} from "./people";
 
 const ID = "00000000-0000-4000-8000-000000000001";
 const person = {
@@ -93,6 +103,33 @@ describe("people helpers", () => {
   it("listPeople rejects a response without items", async () => {
     const { client } = stubClient({ people: [] });
     await expect(listPeople(client)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("searchPeople", () => {
+  it("posts the text in the body to the fixed search path, with nothing in the URL", async () => {
+    const { client, request } = stubClient({ items: [person] });
+    expect(await searchPeople(client, "ada 50%_\\/")).toEqual([person]);
+    expect(request.mock.calls[0][0]).toMatchObject({ method: "POST", path: "/api/v1/people/search", body: { query: "ada 50%_\\/" } });
+    expect(request.mock.calls[0][0].query).toBeUndefined();
+    expect(request.mock.calls[0][0].path).not.toContain("ada");
+  });
+  it("sends exactly one field and rejects a response without items", async () => {
+    const { client, request } = stubClient({ people: [] });
+    await expect(searchPeople(client, "x")).rejects.toMatchObject({ kind: "unexpected" });
+    expect(request.mock.calls[0][0].body).toEqual({ query: "x" });
+  });
+  it("shape-checks every result like the list does", async () => {
+    const { client } = stubClient({ items: [{ ...person, id: "nope" }] });
+    await expect(searchPeople(client, "x")).rejects.toMatchObject({ kind: "unexpected" });
+  });
+  it("through the real client: bearer token, JSON body, text never in the URL, 422 fields kept", async () => {
+    const api = new FakeApi();
+    api.addPerson({ display_name: "Sample Friend A" });
+    const client = createApiClient({ baseUrl: "https://api.example.test", getAccessToken: async () => TOKEN, onUnauthorized: vi.fn(), fetchImpl: api.fetch });
+    expect((await searchPeople(client, "sample")).map((p) => p.display_name)).toEqual(["Sample Friend A"]);
+    expect(api.calls[0]).toMatchObject({ method: "POST", path: "/api/v1/people/search", search: "", authorization: `Bearer ${TOKEN}`, contentType: "application/json" });
+    await expect(searchPeople(client, "a\u200db")).rejects.toMatchObject({ kind: "invalid", status: 422, fields: [{ loc: ["body", "query"], type: "value_error" }] });
   });
 });
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkBirthday,
   checkDisplayName,
+  checkSearchQuery,
   checkEntry,
   checkPersonForm,
   countCharacters,
@@ -74,6 +75,24 @@ describe("checkEntry", () => {
     const fifty = Array.from({ length: 50 }, (_, i) => `item ${i}`);
     expect(checkEntry("one more", fifty)).toEqual({ ok: false, error: "You can add at most 50." });
     expect(checkEntry("one more", fifty.slice(1)).ok).toBe(true);
+  });
+});
+
+describe("checkSearchQuery", () => {
+  it("trims and accepts ordinary text, keeping wildcard characters as typed", () => {
+    expect(checkSearchQuery("  sam  ")).toEqual({ ok: true, value: "sam" });
+    expect(checkSearchQuery("50%_\\/")).toEqual({ ok: true, value: "50%_\\/" });
+    expect(checkSearchQuery("o'brien'; DROP TABLE people;--").ok).toBe(true);
+  });
+  it.each(["", "   ", "\t\n"])("asks for text when given %j", (raw) => {
+    expect(checkSearchQuery(raw)).toEqual({ ok: false, error: "Enter part of a name to search for." });
+  });
+  it("allows 120 characters and refuses 121, counting emoji once", () => {
+    expect(checkSearchQuery("😀".repeat(120)).ok).toBe(true);
+    expect(checkSearchQuery("😀".repeat(121))).toEqual({ ok: false, error: "Use 120 characters or fewer." });
+  });
+  it.each(["a\u0000b", "a\u0007b", "a\nb", "a\u2028b"])("refuses control characters in %j", (raw) => {
+    expect(checkSearchQuery(raw).ok).toBe(false);
   });
 });
 

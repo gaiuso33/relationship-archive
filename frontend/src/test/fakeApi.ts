@@ -123,6 +123,10 @@ export class FakeApi {
     if (segments[2] !== "people") return json(404, errorBody("not_found"));
     const [, , , personId, tail] = segments;
 
+    if (personId === "search" && tail === undefined) {
+      return call.method === "POST" ? this.search(call.body) : json(405, errorBody("method_not_allowed"));
+    }
+
     if (personId === undefined) {
       if (call.method === "GET") return json(200, { items: [...this.people].sort(byName) });
       if (call.method === "POST") return this.createPerson(call.body);
@@ -149,6 +153,20 @@ export class FakeApi {
 
   private invalid(field: string, type = "value_error"): Response {
     return json(422, errorBody("validation_error", { fields: [{ loc: ["body", field], type }] }));
+  }
+
+  /** Names only, trimmed, case-insensitive substring, like the real endpoint (minus collation details). */
+  private search(body: unknown): Response {
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (Object.keys(b).some((key) => key !== "query")) return this.invalid("<unknown field>", "extra_forbidden");
+    if (typeof b.query !== "string") return this.invalid("query", "string_type");
+    const text = b.query.trim();
+    if (text === "" || Array.from(text).length > 120 || /[\p{Cc}\u200d\u00a0\ufeff]/u.test(text)) {
+      return this.invalid("query");
+    }
+    const needle = text.toLowerCase();
+    const items = this.people.filter((p) => p.display_name.toLowerCase().includes(needle)).sort(byName);
+    return json(200, { items });
   }
 
   private createPerson(body: unknown): Response {
