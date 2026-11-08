@@ -21,6 +21,13 @@ updates:
       npm-minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript 7 cannot be installed with typescript-eslint, which the project lints with:
+      # typescript-eslint declares `typescript <6.1.0`, and TypeScript 7.0 ships no compiler API.
+      # Remove this entry when typescript-eslint supports TypeScript 7. Reason and removal
+      # condition: docs/security-checks.md ("Automated dependency updates").
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: pip
     directory: /backend
