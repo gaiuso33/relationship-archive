@@ -1,5 +1,7 @@
 import io
 import logging
+import types
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -95,3 +97,24 @@ def test_settings(log_format: str) -> Settings:
 def configured_logging(test_settings: Settings, log_stream: io.StringIO) -> io.StringIO:
     configure_logging(test_settings, log_stream)
     return log_stream
+
+
+@pytest.fixture
+def pin_request_id(monkeypatch: pytest.MonkeyPatch):
+    """Return a function that makes the server generate one fixed request id.
+
+    The id is normally random, so a test that depends on its characters is nondeterministic.
+    Pinning it lets a test cover the unlucky case on purpose. Only the middleware's id
+    generator is replaced; nothing else about the request changes.
+    """
+
+    def pin(hex_id: str) -> str:
+        assert len(hex_id) == 32 and set(hex_id) <= set("0123456789abcdef")
+        import app.core.middleware as middleware
+
+        monkeypatch.setattr(
+            middleware, "uuid", types.SimpleNamespace(uuid4=lambda: uuid.UUID(hex_id))
+        )
+        return hex_id
+
+    return pin

@@ -27,6 +27,7 @@ from app.models.person import Person
 from app.schemas.people import PersonCreate
 from app.services import people as people_service
 from tests import auth_support as a
+from tests.support import assert_identifier_not_reflected
 
 PEOPLE = f"{API_V1_PREFIX}/people"
 USER_A = a.USER_ID
@@ -568,8 +569,30 @@ def test_a_malformed_identifier_is_a_validation_error(
     response = request_for(client, method, person_id, as_a)
 
     error = assert_error(response, 422, "validation_error")
-    assert person_id not in response.text
+    assert_identifier_not_reflected(error, person_id)
     assert error["fields"][0]["loc"] == ["path", "person_id"]
+
+
+@pytest.mark.parametrize("method", ["GET", "PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    "request_id",
+    ["123" + "a" * 29, "b" * 14 + "123" + "c" * 15, "d" * 29 + "123"],
+    ids=["id-starts-with-123", "id-contains-123", "id-ends-with-123"],
+)
+def test_a_request_id_that_contains_the_identifier_is_not_a_reflection(
+    client: TestClient, as_a: dict, pin_request_id, method: str, request_id: str
+) -> None:
+    """Regression test for #73: the check once failed whenever the random request id held "123"."""
+    pin_request_id(request_id)
+
+    response = request_for(client, method, "123", as_a)
+
+    error = assert_error(response, 422, "validation_error")
+    assert error["request_id"] == request_id
+    assert "123" in error["request_id"]
+    assert error["message"] == "Some fields are missing or invalid."
+    assert error["fields"] == [{"loc": ["path", "person_id"], "type": error["fields"][0]["type"]}]
+    assert_identifier_not_reflected(error, "123")
 
 
 # --- input validation ------------------------------------------------------------------------
