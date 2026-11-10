@@ -79,8 +79,8 @@ note, interest or preference. Tests check this.
 
 **Case-insensitivity depends on the database's collation.** It is PostgreSQL's `ILIKE`, which
 follows the database's locale settings, so this is not universal Unicode case folding. Checked on
-PostgreSQL 17.10 (one-off, by hand; CI runs only the `postgres:17` image's default,
-`en_US.UTF-8`) against five databases:
+PostgreSQL 17.10 (one-off, by hand; CI runs only the `postgres:17` image's default, which is
+expected to be `en_US.UTF-8` and which CI now records, see below) against five databases:
 
 | Behaviour | libc `en_US.UTF-8`, libc `C.UTF-8`, builtin `C.UTF-8` | ICU `en-US` | `C` locale |
 |---|---|---|---|
@@ -93,10 +93,42 @@ PostgreSQL 17.10 (one-off, by hand; CI runs only the `postgres:17` image's defau
 | `é` as one character vs `e` plus a combining accent | never equal | never equal | never equal |
 
 The last row is the practical one: text typed or pasted in a different Unicode form from the
-stored name will not match. Scripts without case (such as Chinese) match exactly. The production
-database's collation is not known yet (hosting is open under #33); check it there with
-`select datlocprovider, datcollate, datctype from pg_database where datname = current_database()`
-before relying on non-ASCII folding.
+stored name will not match. Scripts without case (such as Chinese) match exactly.
+
+**Finding out what a database uses.** Run `python -m app.tools.db_collation` against it (it
+reads `DATABASE_URL`, changes nothing and prints no connection details), or run this SQL, which
+works on PostgreSQL 15, 16 and 17 (checked on 16.15 and 17.10):
+
+```sql
+select split_part(version(), ' ', 2) as server,
+       pg_encoding_to_char(encoding) as encoding,
+       datlocprovider, datcollate, datctype,
+       to_jsonb(d)->>'datlocale'    as datlocale,      -- PostgreSQL 17 and later
+       to_jsonb(d)->>'daticulocale' as daticulocale,   -- PostgreSQL 15 and 16
+       datcollversion
+from pg_database d
+where datname = current_database();
+```
+
+Read it by provider (`datlocprovider`: `c` libc, `i` ICU, `b` builtin). For `c`, the locale is
+`datcollate` and `datctype`. **For `i` and `b`, `datcollate` and `datctype` are still filled in
+(with the cluster's defaults, for example `C.UTF-8`) but are not what the database uses**: the
+locale is in `datlocale` (17+) or `daticulocale` (15 and 16). A query that omits those columns
+shows an ICU `en-US` database as `C.UTF-8`. A column can also carry its own collation, so check
+`people.display_name` too (the tool does):
+
+```sql
+select collation_name from information_schema.columns
+where table_name = 'people' and column_name = 'display_name';   -- null: the database default
+```
+
+PostgreSQL version differences: `datlocprovider` and `datcollversion` exist from 15, so this SQL
+fails on 14 and earlier (there the database locale is always libc, and ICU is per collation);
+the ICU locale column was renamed from `daticulocale` to `datlocale` in 17; the `builtin`
+provider is new in 17. The production database's collation is not known yet (hosting is open
+under #33). Before relying on non-ASCII folding there, follow
+[database-collation-checklist.md](database-collation-checklist.md). CI records the value it runs
+against in each backend job's summary; it does not require any particular collation.
 
 **Tests** (`backend/tests/test_people_search_api.py`) cover the J7 example, another user's
 people (never returned, including with an identical name and at the service layer), names-only,

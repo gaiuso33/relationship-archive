@@ -108,5 +108,11 @@ jobs:
       - name: Check models and migrations agree
         run: alembic check
 
+      # Information only. It prints the locale and collation of the database the tests run on
+      # (search by name follows it) and never fails because of a value. It forces no
+      # collation. See docs/database-collation-checklist.md.
+      - name: Record database collation
+        run: python -m app.tools.db_collation --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Run tests
         run: pytest -q
